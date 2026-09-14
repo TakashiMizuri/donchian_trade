@@ -103,7 +103,7 @@ func truncate(s string, n int) string {
 
 type MarketMeta struct {
 	Symbol        string
-	MarketID      uint8
+	MarketID      uint16
 	SizeDecimals  int
 	PriceDecimals int
 	MinBaseAmount float64
@@ -137,12 +137,13 @@ func (c *HTTPClient) Markets(ctx context.Context) ([]MarketMeta, error) {
 		}
 		sym := strField(m, "symbol", "market_symbol")
 		id := intField(m, "market_id", "market_index", "index")
-		if id < 0 || id > 255 {
+		mid, ok := asMarketID(id)
+		if !ok {
 			continue
 		}
 		out = append(out, MarketMeta{
 			Symbol:        strings.ToUpper(sym),
-			MarketID:      uint8(id),
+			MarketID:      mid,
 			SizeDecimals:  intField(m, "supported_size_decimals", "size_decimals"),
 			PriceDecimals: intField(m, "supported_price_decimals", "price_decimals"),
 			MinBaseAmount: floatField(m, "min_base_amount"),
@@ -201,7 +202,7 @@ func candleTimeSec(t int64) int64 {
 	return t
 }
 
-func (c *HTTPClient) Candles(ctx context.Context, marketID uint8, resolution string, startMs, endMs int64, countBack int) ([]strategy.Bar, error) {
+func (c *HTTPClient) Candles(ctx context.Context, marketID uint16, resolution string, startMs, endMs int64, countBack int) ([]strategy.Bar, error) {
 	q := url.Values{}
 	q.Set("market_id", strconv.Itoa(int(marketID)))
 	q.Set("resolution", resolution)
@@ -230,7 +231,7 @@ func (c *HTTPClient) Candles(ctx context.Context, marketID uint8, resolution str
 	return out, nil
 }
 
-func (c *HTTPClient) Backfill1h(ctx context.Context, marketID uint8, from time.Time) ([]strategy.Bar, error) {
+func (c *HTTPClient) Backfill1h(ctx context.Context, marketID uint16, from time.Time) ([]strategy.Bar, error) {
 	end := time.Now().UTC()
 	var all []strategy.Bar
 	seen := map[int64]struct{}{}
@@ -273,7 +274,7 @@ type Account struct {
 }
 
 type Position struct {
-	MarketID       uint8
+	MarketID       uint16
 	Symbol         string
 	Sign           int
 	Size           float64
@@ -328,11 +329,12 @@ func parseAccount(b []byte) (*Account, error) {
 			continue
 		}
 		id := intField(pm, "market_id")
-		if id < 0 || id > 255 {
+		mid, ok := asMarketID(id)
+		if !ok {
 			continue
 		}
 		acc.Positions = append(acc.Positions, Position{
-			MarketID:      uint8(id),
+			MarketID:      mid,
 			Symbol:        strings.ToUpper(strField(pm, "symbol")),
 			Sign:          intField(pm, "sign"),
 			Size:          math.Abs(floatField(pm, "position")),
@@ -349,7 +351,7 @@ func parseAccount(b []byte) (*Account, error) {
 type OpenOrder struct {
 	OrderIndex       int64
 	ClientOrderIndex int64
-	MarketID         uint8
+	MarketID         uint16
 	Remaining        float64
 	Price            float64
 	Trigger          float64
@@ -359,7 +361,7 @@ type OpenOrder struct {
 	Status           string
 }
 
-func (c *HTTPClient) ActiveOrders(ctx context.Context, accountIndex int64, marketID uint8) ([]OpenOrder, error) {
+func (c *HTTPClient) ActiveOrders(ctx context.Context, accountIndex int64, marketID uint16) ([]OpenOrder, error) {
 	q := url.Values{}
 	q.Set("account_index", strconv.FormatInt(accountIndex, 10))
 	q.Set("market_id", strconv.Itoa(int(marketID)))
@@ -390,13 +392,14 @@ func (c *HTTPClient) ActiveOrders(ctx context.Context, accountIndex int64, marke
 			continue
 		}
 		mid := intField(m, "market_id", "market_index")
-		if mid < 0 || mid > 255 {
-			mid = int(marketID)
+		parsed, ok := asMarketID(mid)
+		if !ok {
+			parsed = marketID
 		}
 		out = append(out, OpenOrder{
 			OrderIndex:       int64(intField(m, "order_index", "order_id")),
 			ClientOrderIndex: int64(intField(m, "client_order_index", "client_order_id")),
-			MarketID:         uint8(mid),
+			MarketID:         parsed,
 			Remaining:        floatField(m, "remaining_base_amount", "remaining_base_size"),
 			Price:            floatField(m, "price"),
 			Trigger:          floatField(m, "trigger_price"),
@@ -465,6 +468,13 @@ func strField(m map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func asMarketID(id int) (uint16, bool) {
+	if id < 0 || id > 65535 {
+		return 0, false
+	}
+	return uint16(id), true
 }
 
 func intField(m map[string]any, keys ...string) int {

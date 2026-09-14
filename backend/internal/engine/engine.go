@@ -23,8 +23,8 @@ type Engine struct {
 	HTTP    *lighter.HTTPClient
 	Signer  *lighter.Signer
 	Markets map[string]lighter.MarketMeta
-	IDBySym map[string]uint8
-	SymByID map[uint8]string
+	IDBySym map[string]uint16
+	SymByID map[uint16]string
 	Notify  notify.Notifier
 	Risk    *risk.Guard
 	Log     *slog.Logger
@@ -55,8 +55,8 @@ func New(cfg *config.Config, st *store.Store, httpc *lighter.HTTPClient, signer 
 	live := strategy.DefaultConfig()
 	base := strategy.DefaultConfig()
 	base.LS5.Enabled = false
-	idBy := map[string]uint8{}
-	symBy := map[uint8]string{}
+	idBy := map[string]uint16{}
+	symBy := map[uint16]string{}
 	for s, m := range markets {
 		idBy[s] = m.MarketID
 		symBy[m.MarketID] = s
@@ -213,7 +213,7 @@ func indexOf(bars []strategy.Bar, t int64) int {
 	return len(bars) - 1
 }
 
-func (e *Engine) OnLiveCandle(marketID uint8, closed *strategy.Bar, live strategy.Bar) {
+func (e *Engine) OnLiveCandle(marketID uint16, closed *strategy.Bar, live strategy.Bar) {
 	sym := e.SymByID[marketID]
 	if sym == "" {
 		return
@@ -517,7 +517,7 @@ func (e *Engine) Reconcile(ctx context.Context) {
 	}
 	eq, _, _ := accountNumbers(acc)
 	e.applyExchangeSnapshot(ctx, acc)
-	byMarket := map[uint8]lighter.Position{}
+	byMarket := map[uint16]lighter.Position{}
 	for _, p := range acc.Positions {
 		if p.Size > 0 {
 			byMarket[p.MarketID] = p
@@ -755,7 +755,7 @@ type Snapshot struct {
 
 type SymbolSnap struct {
 	Symbol          string  `json:"symbol"`
-	MarketID        uint8   `json:"market_id"`
+	MarketID        uint16  `json:"market_id"`
 	LastBarTime     int64   `json:"last_bar_time"`
 	LastPrice       float64 `json:"last_price"`
 	Bars            int     `json:"bars"`

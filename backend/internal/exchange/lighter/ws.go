@@ -14,11 +14,11 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-type CandleHandler func(marketID uint8, closed *strategy.Bar, live strategy.Bar)
+type CandleHandler func(marketID uint16, closed *strategy.Bar, live strategy.Bar)
 
 type WS struct {
 	URL       string
-	Markets   map[uint8]string // id → symbol
+	Markets   map[uint16]string // id → symbol
 	OnCandle  CandleHandler
 	OnState   func(connected bool, err string)
 	mu        sync.Mutex
@@ -26,7 +26,7 @@ type WS struct {
 	closed    map[string]int64 // symbol → last closed bar time
 }
 
-func NewWS(url string, markets map[uint8]string) *WS {
+func NewWS(url string, markets map[uint16]string) *WS {
 	return &WS{URL: url, Markets: markets, closed: map[string]int64{}}
 }
 
@@ -169,15 +169,15 @@ func rawToBar(c CandleRaw) strategy.Bar {
 	}
 }
 
-func parseMarketFromChannel(ch string) uint8 {
-	// candle:0:1h  or candle/0/1h
+func parseMarketFromChannel(ch string) uint16 {
+	// candle:0:1h  or candle/4096/1h
 	ch = strings.ReplaceAll(ch, "/", ":")
 	parts := strings.Split(ch, ":")
 	if len(parts) >= 2 {
 		var id int
 		fmt.Sscanf(parts[1], "%d", &id)
-		if id >= 0 && id <= 255 {
-			return uint8(id)
+		if mid, ok := asMarketID(id); ok {
+			return mid
 		}
 	}
 	return 0

@@ -90,7 +90,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	idToSym := map[uint8]string{}
+	idToSym := map[uint16]string{}
 	for s, m := range markets {
 		idToSym[m.MarketID] = s
 	}

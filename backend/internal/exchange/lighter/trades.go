@@ -11,7 +11,7 @@ import (
 
 // Fill is one Lighter trade print against our account.
 type Fill struct {
-	MarketID  uint8
+	MarketID  uint16
 	Price     float64
 	Size      float64
 	USD       float64
@@ -24,7 +24,7 @@ type Fill struct {
 	BidAcct   int64
 }
 
-func (c *HTTPClient) AccountTrades(ctx context.Context, accountIndex int64, marketID uint8, limit int) ([]Fill, error) {
+func (c *HTTPClient) AccountTrades(ctx context.Context, accountIndex int64, marketID uint16, limit int) ([]Fill, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -36,9 +36,7 @@ func (c *HTTPClient) AccountTrades(ctx context.Context, accountIndex int64, mark
 	q.Set("sort_by", "timestamp")
 	q.Set("sort_dir", "desc")
 	q.Set("limit", strconv.Itoa(limit))
-	if marketID != 255 {
-		q.Set("market_id", strconv.Itoa(int(marketID)))
-	}
+	q.Set("market_id", strconv.Itoa(int(marketID)))
 	b, err := c.get(ctx, "/api/v1/trades", q, true)
 	if err != nil {
 		return nil, err
@@ -60,12 +58,12 @@ func (c *HTTPClient) AccountTrades(ctx context.Context, accountIndex int64, mark
 		if err := json.Unmarshal(raw, &m); err != nil {
 			continue
 		}
-		mid := intField(m, "market_id")
-		if mid < 0 || mid > 255 {
+		mid, ok := asMarketID(intField(m, "market_id"))
+		if !ok {
 			continue
 		}
 		out = append(out, Fill{
-			MarketID:  uint8(mid),
+			MarketID:  mid,
 			Price:     floatField(m, "price"),
 			Size:      floatField(m, "size"),
 			USD:       floatField(m, "usd_amount"),
@@ -138,7 +136,7 @@ func VWAP(fills []Fill) (px, qty, fee float64) {
 	return quote / qty, qty, fee
 }
 
-func (c *HTTPClient) WaitFill(ctx context.Context, accountIndex int64, marketID uint8, clientIdx int64, txHash string, fallback float64) (px, fee float64) {
+func (c *HTTPClient) WaitFill(ctx context.Context, accountIndex int64, marketID uint16, clientIdx int64, txHash string, fallback float64) (px, fee float64) {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		fills, err := c.AccountTrades(ctx, accountIndex, marketID, 50)
