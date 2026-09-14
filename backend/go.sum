@@ -24,6 +24,8 @@ github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkp
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
 github.com/elliottech/lighter-go v1.0.9-0.20260901131421-f9829c1f26d4 h1:SHVt41ei/VwxccvtWKvjmTRXqqi2rqnVIzKXIjQM1ek=
 github.com/elliottech/lighter-go v1.0.9-0.20260901131421-f9829c1f26d4/go.mod h1:G5QpWXZfa/ge3EGjrAL3ls11IPUa5KCVt+PG2CQmYnU=
+github.com/elliottech/lighter-go v1.0.9-0.20260911113058-885455470338 h1:Zl7I4/ozODfZ0SBsDBcZ/lV/t/jfmTQymmgR/LK8bNY=
+github.com/elliottech/lighter-go v1.0.9-0.20260911113058-885455470338/go.mod h1:G5QpWXZfa/ge3EGjrAL3ls11IPUa5KCVt+PG2CQmYnU=
 github.com/elliottech/poseidon_crypto v0.0.15 h1:+f/YTnIFEWX1Xss75Ky7QRvhDpR372XAAMtpWxKvp+k=
 github.com/elliottech/poseidon_crypto v0.0.15/go.mod h1:/nFxH8V+3yk3eakI+Arlu5U8XwRXgydBvsiwfA/yYrg=
 github.com/ethereum/c-kzg-4844 v1.0.0 h1:0X1LBXxaEtYD9xsyj9B9ctQEZIpnvVDeoBx8aHEwTNA=

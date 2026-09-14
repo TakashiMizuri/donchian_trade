@@ -5,7 +5,7 @@ go 1.23.0
 toolchain go1.23.1
 
 require (
-	github.com/elliottech/lighter-go v1.0.9-0.20260901131421-f9829c1f26d4
+	github.com/elliottech/lighter-go v1.0.9-0.20260911113058-885455470338
 	github.com/gorilla/websocket v1.5.3
 	modernc.org/sqlite v1.34.5
 )
