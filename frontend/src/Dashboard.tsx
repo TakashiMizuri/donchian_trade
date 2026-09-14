@@ -43,11 +43,11 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
         api.mismatches(),
       ]);
       setStatus(s);
-      setTrades(t);
-      setEquity(e);
+      setTrades(Array.isArray(t) ? t : []);
+      setEquity(Array.isArray(e) ? e : []);
       setStats(st);
-      setEvents(ev);
-      setMismatches(mm);
+      setEvents(Array.isArray(ev) ? ev : []);
+      setMismatches(Array.isArray(mm) ? mm : []);
       setErr("");
     } catch (e) {
       if (String(e) === "Error: auth") onLogout();
@@ -169,7 +169,7 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
             >
               ex-funding
             </button>
-            {["ALL", ...(status.symbols.map((s) => s.symbol) as string[])].map((id) => (
+            {["ALL", ...((status.symbols ?? []).map((s) => s.symbol) as string[])].map((id) => (
               <button
                 key={id}
                 onClick={() => setSymFilter(id)}
@@ -230,7 +230,7 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
             <span className="text-slate-500">daily PnL {fmtUsd(status.daily_pnl)} (не kill)</span>
           </div>
 
-          {status.symbols.map((s) => (
+          {(status.symbols ?? []).map((s) => (
             <div key={s.symbol} className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
               <div className="flex justify-between items-baseline">
                 <div className="text-lg font-semibold">{s.symbol}</div>

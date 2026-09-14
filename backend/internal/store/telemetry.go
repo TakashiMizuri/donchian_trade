@@ -148,7 +148,7 @@ FROM (
 		return nil, err
 	}
 	defer rows.Close()
-	var out []CurvePoint
+	out := make([]CurvePoint, 0)
 	for rows.Next() {
 		var p CurvePoint
 		if err := rows.Scan(&p.TS, &p.Reason, &p.EquityLive, &p.EquityLiveExFunding, &p.UpnlLive, &p.WalletCash,
@@ -269,7 +269,7 @@ SELECT ts, kind, symbol, direction, signal_time, note FROM mismatches WHERE ts>=
 		return nil, err
 	}
 	defer rows.Close()
-	var out []MismatchRow
+	out := make([]MismatchRow, 0)
 	for rows.Next() {
 		var m MismatchRow
 		if err := rows.Scan(&m.TS, &m.Kind, &m.Symbol, &m.Direction, &m.SignalTime, &m.Note); err != nil {

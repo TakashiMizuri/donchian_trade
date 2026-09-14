@@ -817,6 +817,7 @@ func (e *Engine) Snapshot(ctx context.Context) Snapshot {
 		Available:            avail,
 		LastError:            g.LastError,
 		Report:               rep,
+		Symbols:              make([]SymbolSnap, 0, len(e.Cfg.Symbols)),
 	}
 	for _, sym := range e.Cfg.Symbols {
 		st := e.liveST[sym]

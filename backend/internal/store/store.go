@@ -505,7 +505,7 @@ SELECT ts, level, kind, message FROM events ORDER BY id DESC LIMIT ?`, limit)
 		return nil, err
 	}
 	defer rows.Close()
-	var out []EventRow
+	out := make([]EventRow, 0)
 	for rows.Next() {
 		var e EventRow
 		if err := rows.Scan(&e.TS, &e.Level, &e.Kind, &e.Message); err != nil {
