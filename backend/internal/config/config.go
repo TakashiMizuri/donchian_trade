@@ -95,7 +95,7 @@ func Load() (*Config, error) {
 		ATRStopMult:       1.5,
 		RiskPct:           1.0,
 		MaxRiskUSD:        1000,
-		FeeRate:           0.0005,
+		FeeRate:           0, // Lighter Standard: 0 maker / 0 taker. Live fills and both shadow books.
 		LS5Enabled:        true,
 		LossStreakN:       5,
 		PauseBars:         24,

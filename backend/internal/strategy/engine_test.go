@@ -62,6 +62,17 @@ func TestSizing(t *testing.T) {
 	almostEqual(t, "cap", capped, 1000, 1e-12)
 }
 
+func TestDefaultConfigMatchesLighterStandard(t *testing.T) {
+	if DefaultConfig().FeeRate != 0 {
+		t.Fatalf("shadow/live default fee must be 0, got %v", DefaultConfig().FeeRate)
+	}
+	_, entryFee, exitFee, net, _ := ApplyFillCosts(10_000, 2, 100, 110, DirBuy, OutcomeTime, 100, 0)
+	if entryFee != 0 || exitFee != 0 {
+		t.Fatalf("fees %v %v", entryFee, exitFee)
+	}
+	almostEqual(t, "net", net, 20, 1e-12)
+}
+
 func trendBars(n int, start float64, step float64) []Bar {
 	bars := make([]Bar, n)
 	px := start

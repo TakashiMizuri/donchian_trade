@@ -9,20 +9,17 @@ import (
 )
 
 // livePnL is layer-B accounting: actual fills, not research −1R on stops.
+// funding is already in PnL sign (positive = received).
 func livePnL(dir strategy.Direction, qty, entry, exit, entryFee, exitFee, funding float64) (gross, net float64) {
 	gross = strategy.GrossMove(dir, entry, exit) * qty
 	net = gross - entryFee - exitFee + funding
 	return
 }
 
-func modelFee(qty, px, rate float64) float64 {
-	if rate <= 0 {
-		rate = 0.0005
-	}
-	if qty <= 0 || px <= 0 {
-		return 0
-	}
-	return qty * px * rate
+// fundingPnL converts Lighter total_funding_paid_out into trade PnL.
+// The exchange field grows when we pay. PnL is the opposite.
+func fundingPnL(basisPaidOut, lastPaidOut float64) float64 {
+	return basisPaidOut - lastPaidOut
 }
 
 func (e *Engine) waitFill(ctx context.Context, symbol string, clientIdx int64, txHash string, fallback float64) (px, fee float64) {
@@ -38,6 +35,7 @@ func (e *Engine) waitFill(ctx context.Context, symbol string, clientIdx int64, t
 		return px, fee
 	}
 	if avg := e.positionAvg(ctx, symbol); avg > 0 {
+		e.Log.Warn("fill missing, using position avg", "symbol", symbol, "client", clientIdx, "avg", avg)
 		return avg, 0
 	}
 	return fallback, 0
@@ -93,7 +91,7 @@ func (e *Engine) seedFundingBasis(symbol string) {
 func (e *Engine) pullFunding(symbol string) float64 {
 	e.idxMu.Lock()
 	defer e.idxMu.Unlock()
-	return e.fundingLast[symbol] - e.fundingBasis[symbol]
+	return fundingPnL(e.fundingBasis[symbol], e.fundingLast[symbol])
 }
 
 func (e *Engine) persistOpenFunding(ctx context.Context) {
@@ -112,19 +110,22 @@ func (e *Engine) persistOpenFunding(ctx context.Context) {
 		if err != nil || open == nil {
 			continue
 		}
-		_ = e.Store.SetTradeFunding(ctx, open.ID, last[sym]-basis[sym])
+		_ = e.Store.SetTradeFunding(ctx, open.ID, fundingPnL(basis[sym], last[sym]))
 	}
 }
 
-func (e *Engine) recordEntryFill(ctx context.Context, symbol string, tradeID, clientIdx int64, txHash string, shadowPx, qty float64) float64 {
-	feeRate := e.liveCfg.FeeRate
-	livePx, fee := e.waitFill(ctx, symbol, clientIdx, txHash, shadowPx)
-	if fee <= 0 {
-		fee = modelFee(qty, livePx, feeRate)
+func (e *Engine) recordEntryFill(ctx context.Context, symbol string, tradeID, clientIdx int64, txHash string, shadowPx float64) float64 {
+	livePx, fee := e.waitFill(ctx, symbol, clientIdx, txHash, 0)
+	if livePx <= 0 {
+		e.Log.Warn("entry fill not found, using signal price", "symbol", symbol, "client", clientIdx, "px", shadowPx)
+		livePx = shadowPx
+		fee = 0
 	}
 	_ = e.Store.SetEntryLive(ctx, tradeID, shadowPx, livePx, fee)
-	if acc, err := e.HTTP.Account(ctx, e.Cfg.AccountIndex); err == nil {
-		e.markFunding(acc)
+	if e.HTTP != nil {
+		if acc, err := e.HTTP.Account(ctx, e.Cfg.AccountIndex); err == nil {
+			e.markFunding(acc)
+		}
 	}
 	e.seedFundingBasis(symbol)
 	return livePx
@@ -145,15 +146,18 @@ func (e *Engine) finishCloseLive(ctx context.Context, symbol string, tradeID int
 	shadowExit := t.ExitPrice
 	liveExit, exitFee := e.waitFill(ctx, symbol, clientIdx, txHash, 0)
 	if liveExit <= 0 {
+		exitFee = 0
 		if px := e.LastPrice(symbol); px > 0 {
+			e.Log.Warn("exit fill not found, using last price", "symbol", symbol, "client", clientIdx, "px", px)
 			liveExit = px
 		} else {
+			e.Log.Warn("exit fill not found, using shadow exit", "symbol", symbol, "client", clientIdx, "px", shadowExit)
 			liveExit = shadowExit
 		}
 	}
 	row, _ := e.Store.TradeBySignal(ctx, symbol, telemetry.BookLive, t.SignalTime)
 	liveEntry := t.EntryPrice
-	entryFee := t.EntryFee
+	entryFee := 0.0
 	qty := t.Quantity
 	if row != nil {
 		if row.EntryPxLive > 0 {
@@ -161,7 +165,7 @@ func (e *Engine) finishCloseLive(ctx context.Context, symbol string, tradeID int
 		} else if row.EntryPrice.Float64 > 0 {
 			liveEntry = row.EntryPrice.Float64
 		}
-		if row.EntryFee.Float64 > 0 {
+		if row.EntryFee.Valid {
 			entryFee = row.EntryFee.Float64
 		}
 		if row.Quantity.Float64 > 0 {
@@ -170,9 +174,6 @@ func (e *Engine) finishCloseLive(ctx context.Context, symbol string, tradeID int
 		if tradeID == 0 {
 			tradeID = row.ID
 		}
-	}
-	if exitFee <= 0 {
-		exitFee = modelFee(qty, liveExit, e.liveCfg.FeeRate)
 	}
 	funding := e.pullFunding(symbol)
 	gross, net := livePnL(t.Direction, qty, liveEntry, liveExit, entryFee, exitFee, funding)

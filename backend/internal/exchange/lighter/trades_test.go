@@ -43,11 +43,26 @@ func TestFillsForClient(t *testing.T) {
 	}
 }
 
-func TestTakerFeeUSDRejectsScaleJunk(t *testing.T) {
-	if takerFeeUSD(map[string]any{"taker_fee": 50.0, "usd_amount": 0.1}) != 0 {
-		t.Fatal("50 on $0.1 notional is not a dollar fee")
+func TestTakerFeeUSD(t *testing.T) {
+	if takerFeeUSD(map[string]any{"usd_amount": 10000.0}) != 0 {
+		t.Fatal("omitted taker_fee is Standard $0")
+	}
+	if takerFeeUSD(map[string]any{"taker_fee": 0.0, "usd_amount": 10000.0}) != 0 {
+		t.Fatal("zero taker_fee is Standard $0")
+	}
+	// Premium 500k LIT: 196 ppm = 0.0196% of $10k → $1.96
+	if g := takerFeeUSD(map[string]any{"taker_fee": 196.0, "usd_amount": 10000.0}); g < 1.95 || g > 1.97 {
+		t.Fatalf("ppm fee %v", g)
+	}
+	// Plus: 50 ppm = 0.5 bps of $10k → $0.50
+	if g := takerFeeUSD(map[string]any{"taker_fee": 50.0, "usd_amount": 10000.0}); g < 0.49 || g > 0.51 {
+		t.Fatalf("plus fee %v", g)
+	}
+	// USDC micro-units: 2.80 on $10k
+	if g := takerFeeUSD(map[string]any{"taker_fee": 2_800_000.0, "usd_amount": 10000.0}); g < 2.79 || g > 2.81 {
+		t.Fatalf("micro-USDC %v", g)
 	}
 	if g := takerFeeUSD(map[string]any{"taker_fee": 1.5, "usd_amount": 10000.0}); g != 1.5 {
-		t.Fatalf("plausible fee %v", g)
+		t.Fatalf("already-dollar fee %v", g)
 	}
 }

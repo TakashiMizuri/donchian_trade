@@ -46,15 +46,9 @@ func (e *Engine) openFeeEstimate(ctx context.Context) float64 {
 		if r.Outcome.String != "open" {
 			continue
 		}
-		if r.EntryFee.Float64 > 0 {
+		if r.EntryFee.Valid {
 			sum += r.EntryFee.Float64
-			continue
 		}
-		px := r.EntryPxLive
-		if px <= 0 {
-			px = r.EntryPrice.Float64
-		}
-		sum += modelFee(r.Quantity.Float64, px, e.liveCfg.FeeRate)
 	}
 	return sum
 }

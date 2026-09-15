@@ -3,8 +3,7 @@ package engine
 import "math"
 
 // ResidualCash is the unexplained wallet move between two account snapshots.
-// `wallet` must be settled value (equity − uPnL), not Lighter Collateral —
-// collateral often does not drop when a taker fee hits.
+// wallet is settled value (equity − uPnL), not mark-to-market.
 // Trading (closed nets + open-entry fees already in settled equity) is subtracted
 // so only deposits / withdrawals remain.
 func ResidualCash(prevWallet, wallet, prevRealized, realized, prevOpenFees, openFees float64) float64 {
@@ -22,7 +21,7 @@ func cashThreshold(minUSD, equity float64) float64 {
 	if minUSD <= 0 {
 		minUSD = 5
 	}
-	floor := 0.0005 * math.Abs(equity) // 5 bps — swallow mark/fee dust
+	floor := 0.0005 * math.Abs(equity) // 5 bps of equity — ignore mark dust
 	if floor > minUSD {
 		return floor
 	}

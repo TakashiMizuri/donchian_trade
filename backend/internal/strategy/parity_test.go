@@ -88,6 +88,7 @@ func assertParity(t *testing.T, candleDir, csvRel string, ls5 bool) {
 		t.Fatalf("research CSV too short: %d rows", len(want))
 	}
 	cfg := DefaultConfig()
+	cfg.FeeRate = 0.0005 // research CSVs were built with Binance VIP0; live/shadow books use 0
 	if !ls5 {
 		cfg.LS5.Enabled = false
 	}

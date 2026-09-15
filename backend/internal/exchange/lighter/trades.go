@@ -79,15 +79,31 @@ func (c *HTTPClient) AccountTrades(ctx context.Context, accountIndex int64, mark
 	return out, nil
 }
 
-// takerFeeUSD: Lighter's taker_fee is an integer of unclear scale. Only keep
-// values that look like a dollar fee (positive and < 2% of notional).
+// takerFeeUSD converts Lighter's trade fee field to dollars.
+// Standard accounts omit the field or send 0 (0 maker / 0 taker).
+// When present it is an integer on the same 1e6 scale as integrator fees:
+// 50 = 0.5 bps (Plus), 196 = 0.0196% (Premium 500k LIT), 280 = 0.0280%.
+// Dollar fee = notional * (taker_fee / 1e6). A huge integer is treated as
+// USDC micro-units (6 decimals). Never invent a Binance 5 bps fee here.
 func takerFeeUSD(m map[string]any) float64 {
 	fee := floatField(m, "taker_fee")
+	if fee <= 0 {
+		return 0
+	}
 	notional := floatField(m, "usd_amount")
 	if notional <= 0 {
 		notional = floatField(m, "price") * floatField(m, "size")
 	}
-	if fee > 0 && notional > 0 && fee < notional*0.02 {
+	const maxPPM = 10000 // 1% — above every published Lighter tier
+	if fee == float64(int64(fee)) && fee <= maxPPM && notional > 0 {
+		return notional * fee / 1e6
+	}
+	if fee == float64(int64(fee)) && fee > maxPPM {
+		if micro := fee / 1e6; notional > 0 && micro > 0 && micro < notional*0.02 {
+			return micro
+		}
+	}
+	if notional > 0 && fee < notional*0.02 {
 		return fee
 	}
 	return 0
@@ -137,9 +153,9 @@ func VWAP(fills []Fill) (px, qty, fee float64) {
 }
 
 func (c *HTTPClient) WaitFill(ctx context.Context, accountIndex int64, marketID uint16, clientIdx int64, txHash string, fallback float64) (px, fee float64) {
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for {
-		fills, err := c.AccountTrades(ctx, accountIndex, marketID, 50)
+		fills, err := c.AccountTrades(ctx, accountIndex, marketID, 100)
 		if err == nil {
 			subset := FillsForClient(fills, clientIdx)
 			if len(subset) == 0 {

@@ -128,6 +128,15 @@
   html {
     @apply font-sans;
   }
+  button,
+  [role="button"] {
+    cursor: pointer;
+  }
+  button:disabled,
+  [role="button"][aria-disabled="true"],
+  [data-disabled] {
+    cursor: not-allowed;
+  }
   #root {
     min-height: 100dvh;
   }

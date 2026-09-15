@@ -71,7 +71,7 @@ func DefaultConfig() Config {
 		ATRStopMult: 1.5,
 		RiskPct:     1.0,
 		MaxRiskUSD:  1000,
-		FeeRate:     0.0005,
+		FeeRate:     0, // Lighter Standard: 0 maker / 0 taker. Not Binance 5 bps.
 		LS5: LS5Config{
 			Enabled:   true,
 			StreakN:   5,

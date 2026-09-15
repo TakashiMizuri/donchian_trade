@@ -1,6 +1,6 @@
 const PROFILE: Record<string, string> = {
   live: "Live",
-  shadow_ls5: "Тень ls5",
+  shadow_ls5: "Тень",
   shadow_baseline: "Без паузы",
 };
 
@@ -15,9 +15,9 @@ const SIDE: Record<string, string> = {
 const OUTCOME: Record<string, string> = {
   open: "открыта",
   sl: "стоп",
-  time: "выход по каналу",
-  kill: "kill-switch",
-  watchdog: "сторож",
+  time: "по каналу",
+  kill: "аварийный стоп",
+  watchdog: "автозакрытие",
   rejected: "биржа отказала",
 };
 
@@ -36,15 +36,15 @@ const CASH: Record<string, string> = {
 const LAYER: Record<string, { title: string; hint: string }> = {
   a: {
     title: "Входы",
-    hint: "Совпадают ли реальные входы с тенью. Красный — торгуете не ту стратегию.",
+    hint: "Совпадают ли реальные входы с тенью по часу и стороне.",
   },
   b: {
     title: "Исполнение",
-    hint: "Насколько хуже Live входит и выходит, чем тень. Это проскальзывание, не сигнал.",
+    hint: "Насколько цена Live хуже тени. Считается по закрытым совпавшим сделкам.",
   },
   c: {
     title: "PnL vs тень",
-    hint: "Отношение прибыли Live (без funding) к тени. До ~20 закрытых пар это шум.",
+    hint: "Отношение прибыли Live (без фандинга) к тени. Пока мало закрытых сделок — это шум.",
   },
 };
 
@@ -54,6 +54,27 @@ const CHECK: Record<string, string> = {
   orange: "плохо",
   red: "стоп",
   na: "рано",
+};
+
+const EVENT_LEVEL: Record<string, string> = {
+  error: "ошибка",
+  warn: "внимание",
+  info: "событие",
+  debug: "отладка",
+};
+
+const EVENT_KIND: Record<string, string> = {
+  entry: "вход",
+  exit: "выход",
+  sl: "стоп",
+  stop: "стоп",
+  cash: "касса",
+  ws: "стрим",
+  risk: "риск",
+  verdict: "вердикт",
+  kill: "аварийный стоп",
+  watchdog: "автозакрытие",
+  report: "отчёт",
 };
 
 export function profileLabel(v: string) {
@@ -86,6 +107,14 @@ export function checkLabel(v: string) {
   return CHECK[v?.toLowerCase()] ?? v ?? "—";
 }
 
+export function eventLevelLabel(v: string) {
+  return EVENT_LEVEL[v?.toLowerCase()] ?? v;
+}
+
+export function eventKindLabel(v: string) {
+  return EVENT_KIND[v?.toLowerCase()] ?? v;
+}
+
 export function networkLabel(v: string, dryRun: boolean) {
   const net = v === "mainnet" ? "mainnet" : "тестнет";
   return dryRun ? `${net} · без ордеров` : net;
@@ -95,22 +124,33 @@ export function strategyLabel(v: string) {
   return v || "Donchian";
 }
 
+export function verdictLabel(v: string) {
+  switch (v) {
+    case "STOP":
+      return "стоп";
+    case "INVESTIGATE":
+      return "разобрать";
+    default:
+      return "сходится";
+  }
+}
+
 export function verdictCopy(v: string): { title: string; body: string } {
   switch (v) {
     case "STOP":
       return {
         title: "Стоп",
-        body: "Либо включён kill-switch, либо Live и тень разошлись критично. Новые входы не идут. Тень продолжает считать сигналы.",
+        body: "Включён аварийный стоп или Live и тень разошлись. Новые входы не идут. Тень продолжает считать сигналы.",
       };
     case "INVESTIGATE":
       return {
         title: "Нужно разобрать",
-        body: "Есть расхождение входов или исполнения. Тест можно вести, на mainnet не переходить. Смотрите расхождения ниже.",
+        body: "Есть расхождение входов или исполнения. Список — в блоке «Расхождения».",
       };
     default:
       return {
         title: "Всё сходится",
-        body: "Live и тень торгуют одно и то же. Это не разрешение на mainnet — только что сейчас нет разъезда.",
+        body: "Live и тень торгуют одно и то же.",
       };
   }
 }

@@ -21,8 +21,23 @@ func TestLivePnLShort(t *testing.T) {
 	}
 }
 
-func TestModelFee(t *testing.T) {
-	if f := modelFee(2, 100, 0.0005); f < 0.099 || f > 0.101 {
-		t.Fatalf("fee %v", f)
+func TestFundingPnLSign(t *testing.T) {
+	// paid_out rose by 10 → we paid → PnL −10
+	if g := fundingPnL(0, 10); g != -10 {
+		t.Fatalf("paid %v", g)
+	}
+	// paid_out fell (negative) → we received
+	if g := fundingPnL(0, -4); g != 4 {
+		t.Fatalf("received %v", g)
+	}
+}
+
+func TestLiveDoesNotInventBinanceFee(t *testing.T) {
+	gross, net := livePnL("BUY", 2, 100, 101, 0, 0, 0)
+	if gross < 1.99 || gross > 2.01 {
+		t.Fatalf("gross %v", gross)
+	}
+	if net != gross {
+		t.Fatalf("net %v should equal gross when Lighter charged $0", net)
 	}
 }

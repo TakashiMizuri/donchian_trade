@@ -11,17 +11,22 @@ import {
   fmtBps,
   fmtPct,
   fmtPx,
+  fmtQty,
   fmtTime,
   fmtUsd,
   fmtUsdCompact,
+  fmtUptime,
   Mismatch,
   Stats,
   Status,
+  SymbolSnap,
   Trade,
 } from "./api";
 import {
   cashLabel,
   checkLabel,
+  eventKindLabel,
+  eventLevelLabel,
   layerMeta,
   mismatchLabel,
   networkLabel,
@@ -30,6 +35,7 @@ import {
   sideLabel,
   strategyLabel,
   verdictCopy,
+  verdictLabel,
 } from "./labels";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
@@ -71,13 +77,13 @@ const RANGE_LABEL: Record<Range, string> = {
 
 const equityConfig = {
   live: { label: "Live", color: "var(--chart-1)" },
-  ls5: { label: "Тень ls5", color: "var(--chart-2)" },
+  ls5: { label: "Тень", color: "var(--chart-2)" },
   base: { label: "Без паузы", color: "var(--chart-3)" },
-  live_xf: { label: "Live без funding", color: "var(--chart-4)" },
+  live_xf: { label: "Live без фандинга", color: "var(--chart-4)" },
 } satisfies ChartConfig;
 
 const gapConfig = {
-  gap: { label: "Разрыв Live − тень", color: "var(--chart-5)" },
+  gap: { label: "Live − тень", color: "var(--chart-5)" },
 } satisfies ChartConfig;
 
 export default function Dashboard({ onLogout }: { onLogout: () => void }) {
@@ -154,10 +160,18 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
     () => liveTrades.filter((t) => !t.outcome || t.outcome === "open"),
     [liveTrades],
   );
+  const closedLive = useMemo(
+    () => liveTrades.filter((t) => t.outcome && t.outcome !== "open"),
+    [liveTrades],
+  );
+  const overviewLive = useMemo(
+    () => [...openLive, ...closedLive].slice(0, 12),
+    [openLive, closedLive],
+  );
   const shownTrades = useMemo(() => {
-    const rows = trades.filter((t) => (bookFilter === "all" ? true : t.profile === bookFilter)).filter((t) =>
-      symFilter === "ALL" ? true : t.symbol === symFilter,
-    );
+    const rows = trades
+      .filter((t) => (bookFilter === "all" ? true : t.profile === bookFilter))
+      .filter((t) => (symFilter === "ALL" ? true : t.symbol === symFilter));
     return [...rows].sort((a, b) => {
       const ao = !a.outcome || a.outcome === "open" ? 0 : 1;
       const bo = !b.outcome || b.outcome === "open" ? 0 : 1;
@@ -171,7 +185,7 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
     try {
       await api.kill();
       await refresh();
-      toast("Kill-switch включён. Live-позиции закрыты.");
+      toast("Аварийный стоп включён. Live-позиции закрыты.");
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -184,7 +198,7 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
     try {
       await api.resume();
       await refresh();
-      toast("Kill-switch снят. Новые входы снова разрешены.");
+      toast("Аварийный стоп снят. Новые входы снова разрешены.");
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -193,13 +207,15 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
   }
 
   const r = status?.report;
-  const verdict = verdictCopy(status?.kill_switch ? "STOP" : status?.verdict || "WAIT");
+  const activeVerdict = status?.kill_switch ? "STOP" : status?.verdict || "WAIT";
+  const verdict = verdictCopy(activeVerdict);
   const matched = r?.n_matched ?? 0;
   const union = r?.n_union ?? 0;
   const ratio = r?.pnl_ratio_ok ? r.pnl_ratio_xf.toFixed(2) : "рано";
   const symbols = status?.symbols ?? [];
   const showBase = extras.includes("base");
   const showXF = extras.includes("xf");
+  const hasChart = chart.length > 1;
 
   return (
     <div className="mx-auto flex min-h-dvh max-w-5xl flex-col">
@@ -213,22 +229,27 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {status ? <VerdictBadge verdict={status.kill_switch ? "STOP" : status.verdict} /> : null}
+          {status ? <VerdictBadge verdict={activeVerdict} /> : null}
           <Badge variant={status?.ws_connected ? "secondary" : "destructive"}>
-            {status?.ws_connected ? "стрим ок" : "стрим молчит"}
+            {status?.ws_connected ? "стрим" : "нет стрима"}
           </Badge>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            type="button"
-            aria-label="Выйти"
-            onClick={() => {
-              void api.logout();
-              onLogout();
-            }}
-          >
-            <LogOutIcon />
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                type="button"
+                aria-label="Выйти"
+                onClick={() => {
+                  void api.logout();
+                  onLogout();
+                }}
+              >
+                <LogOutIcon />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Выйти</TooltipContent>
+          </Tooltip>
         </div>
       </header>
 
@@ -241,10 +262,12 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
         ) : null}
 
         {!status ? (
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Skeleton className="h-28" />
-            <Skeleton className="h-28" />
-            <Skeleton className="h-64 sm:col-span-2" />
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Skeleton className="h-24" />
+            <Skeleton className="h-24" />
+            <Skeleton className="h-24" />
+            <Skeleton className="h-24" />
+            <Skeleton className="h-72 sm:col-span-2 lg:col-span-4" />
           </div>
         ) : (
           <Tabs value={tab} onValueChange={setTab}>
@@ -255,7 +278,7 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
             </TabsList>
 
             <TabsContent value="overview" className="flex flex-col gap-4">
-              <Alert>
+              <Alert variant={activeVerdict === "STOP" ? "destructive" : "default"}>
                 <AlertTitle>{verdict.title}</AlertTitle>
                 <AlertDescription>{verdict.body}</AlertDescription>
               </Alert>
@@ -263,38 +286,35 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 <StatCard
                   title="Live"
-                  hint="Реальный счёт на Lighter."
+                  hint="Реальный счёт на бирже."
                   value={fmtUsd(status.equity)}
                   sub={`просадка ${r ? fmtPct(r.dd_live) : "—"}`}
                 />
                 <StatCard
-                  title="Тень ls5"
-                  hint="Тот же сигнал, без ордеров. Пауза после 5 убытков подряд — как у Live."
+                  title="Тень"
+                  hint="Тот же сигнал без ордеров. После пяти убытков подряд — пауза, как у Live."
                   value={fmtUsd(status.equity_shadow_ls5)}
                   sub={`просадка ${r ? fmtPct(r.dd_shadow_ls5) : "—"}`}
                 />
                 <StatCard
                   title="Разрыв"
-                  hint="Live без funding минус тень. Большой минус — Live отстаёт от того, что должна давать стратегия."
+                  hint="Live без фандинга минус тень. Большой минус значит, что Live отстаёт от сигнала."
                   value={fmtUsd(status.gap_usd)}
                   sub={fmtPct(status.gap_pct)}
                   warn={status.gap_usd < -50}
                 />
                 <StatCard
-                  title="Совпало"
-                  hint="Сколько входов Live и тени совпали по часу и стороне. 3 из 5 после бага SDK — это не разъезд стратегии."
+                  title="Совпадения"
+                  hint="Сколько входов Live и тени совпали по часу и стороне."
                   value={union ? `${matched} из ${union}` : "пока нет"}
-                  sub={`за неделю ${pct3(status.match_rate_7d)}`}
+                  sub={union ? `за неделю ${pct3(status.match_rate_7d)}` : "нужны закрытые сделки"}
                 />
               </div>
 
               <Card>
                 <CardHeader>
-                  <CardTitle>Два счёта на одних свечах</CardTitle>
-                  <CardDescription>
-                    Жирная линия — реальные деньги. Серая — тень. Они должны идти рядом. День в минусе сам по себе
-                    ничего не стопает.
-                  </CardDescription>
+                  <CardTitle>Эквити</CardTitle>
+                  <CardDescription>Live и тень на одних свечах. Линии должны идти рядом.</CardDescription>
                 </CardHeader>
                 <CardContent className="flex flex-col gap-3">
                   <div className="flex flex-wrap gap-4">
@@ -319,7 +339,7 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
                       </ToggleGroup>
                     </Field>
                     <Field>
-                      <FieldTitle id="extra-label">Линии</FieldTitle>
+                      <FieldTitle id="extra-label">Дополнительно</FieldTitle>
                       <ToggleGroup
                         type="multiple"
                         size="sm"
@@ -328,32 +348,12 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
                         aria-labelledby="extra-label"
                         onValueChange={setExtras}
                       >
-                        <ToggleGroupItem value="base">без паузы</ToggleGroupItem>
-                        <ToggleGroupItem value="xf">без funding</ToggleGroupItem>
-                      </ToggleGroup>
-                    </Field>
-                    <Field>
-                      <FieldTitle id="sym-label">Рынок</FieldTitle>
-                      <ToggleGroup
-                        type="single"
-                        size="sm"
-                        variant="outline"
-                        value={symFilter}
-                        aria-labelledby="sym-label"
-                        onValueChange={(v) => {
-                          if (v) setSymFilter(v);
-                        }}
-                      >
-                        <ToggleGroupItem value="ALL">все</ToggleGroupItem>
-                        {symbols.map((s) => (
-                          <ToggleGroupItem key={s.symbol} value={s.symbol}>
-                            {s.symbol}
-                          </ToggleGroupItem>
-                        ))}
+                        <ToggleGroupItem value="base">тень без паузы</ToggleGroupItem>
+                        <ToggleGroupItem value="xf">без фандинга</ToggleGroupItem>
                       </ToggleGroup>
                     </Field>
                   </div>
-                  {chart.length > 1 ? (
+                  {hasChart ? (
                     <ChartContainer config={equityConfig} className="aspect-auto h-64 w-full">
                       <LineChart accessibilityLayer data={chart}>
                         <CartesianGrid vertical={false} />
@@ -364,9 +364,7 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
                           width={56}
                           tickFormatter={(v) => fmtUsdCompact(Number(v))}
                         />
-                        <ChartTooltip
-                          content={<ChartTooltipContent indicator="line" />}
-                        />
+                        <ChartTooltip content={<ChartTooltipContent indicator="line" />} />
                         <ChartLegend content={<ChartLegendContent />} />
                         <Line type="monotone" dataKey="live" stroke="var(--color-live)" strokeWidth={2} dot={false} />
                         <Line type="monotone" dataKey="ls5" stroke="var(--color-ls5)" strokeWidth={1.6} dot={false} />
@@ -392,17 +390,10 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
                       </LineChart>
                     </ChartContainer>
                   ) : (
-                    <Empty className="border border-dashed">
-                      <EmptyHeader>
-                        <EmptyMedia variant="icon">
-                          <ActivityIcon />
-                        </EmptyMedia>
-                        <EmptyTitle>Кривой ещё нет</EmptyTitle>
-                        <EmptyDescription>
-                          Телеметрия пишется после первой закрытой часовой свечи. Пока бот только стартовал — это нормально.
-                        </EmptyDescription>
-                      </EmptyHeader>
-                    </Empty>
+                    <QuietEmpty
+                      title="Кривой ещё нет"
+                      text="Появится после первой закрытой часовой свечи."
+                    />
                   )}
                 </CardContent>
               </Card>
@@ -410,10 +401,10 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
               <Card>
                 <CardHeader>
                   <CardTitle>Разрыв</CardTitle>
-                  <CardDescription>На сколько Live без funding отстаёт от тени. Ровная линия около нуля — хорошо.</CardDescription>
+                  <CardDescription>На сколько Live без фандинга отстаёт от тени. Около нуля — хорошо.</CardDescription>
                 </CardHeader>
                 <CardContent>
-                  {chart.length > 1 ? (
+                  {hasChart ? (
                     <ChartContainer config={gapConfig} className="aspect-auto h-36 w-full">
                       <LineChart accessibilityLayer data={chart}>
                         <CartesianGrid vertical={false} />
@@ -429,87 +420,118 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
                       </LineChart>
                     </ChartContainer>
                   ) : (
-                    <p className="text-sm text-muted-foreground">Появится вместе с кривой эквити.</p>
+                    <QuietEmpty title="Пока пусто" text="Появится вместе с кривой эквити." />
                   )}
                 </CardContent>
               </Card>
 
               <div className="grid gap-3 md:grid-cols-3">
-                <CheckCard id="a" value={status.status_a} detail={`за всё время ${pct3(status.match_rate_ltd)}`} />
+                <CheckCard
+                  id="a"
+                  value={status.status_a}
+                  detail={union ? `за всё время ${pct3(status.match_rate_ltd)}` : "пока нет совпавших входов"}
+                />
                 <CheckCard
                   id="b"
                   value={status.status_b}
-                  detail={`медиана ${fmtBps(status.side_slip_median_bps)}${r ? ` · p90 ${fmtBps(r.side_slip_p90_bps)}` : ""}`}
+                  detail={
+                    status.status_b === "na"
+                      ? "нужны закрытые совпавшие сделки"
+                      : `медиана ${fmtBps(status.side_slip_median_bps)}${r ? ` · p90 ${fmtBps(r.side_slip_p90_bps)}` : ""}`
+                  }
                 />
                 <CheckCard
                   id="c"
                   value={status.status_c}
-                  detail={`Live / тень = ${ratio}${r?.pnl_ratio_ok ? "" : " — тень ещё почти не изменилась"}`}
+                  detail={r?.pnl_ratio_ok ? `Live / тень = ${ratio}` : "пока рано — мало закрытых сделок"}
                 />
               </div>
 
               <Card>
                 <CardHeader>
-                  <CardTitle>Как читать цифры</CardTitle>
+                  <CardTitle>Сводка</CardTitle>
                 </CardHeader>
                 <CardContent className="grid gap-3 text-sm sm:grid-cols-2">
-                  <Meta k="Funding" v={fmtUsd(status.funding)} hint="Плата за удержание. В вердикте Live смотрим без неё." />
-                  <Meta k="День" v={fmtUsd(status.daily_pnl)} hint="Не стоп-сигнал. Красный день у Donchian — обычное дело." />
+                  <Meta k="Фандинг" v={fmtUsd(status.funding)} hint="Плата за удержание позиции. В сравнении с тенью Live смотрим без неё." />
+                  <Meta k="За день" v={fmtUsd(status.daily_pnl)} hint="PnL за текущие сутки. Красный день сам по себе ничего не стопает." />
                   <Meta
                     k="Только Live / только тень"
                     v={`${r?.live_only_7d ?? 0} / ${r?.shadow_only_7d ?? 0} за неделю`}
-                    hint="Входы, которых не было у пары. После починки SDK смотрите новые, не старые."
+                    hint="Вход только у Live или только у тени за 7 дней."
                   />
                   <Meta
-                    k="Касса тени"
+                    k="Касса"
                     v={fmtUsd(status.cash_base || status.start_equity)}
                     hint={
                       status.last_cash_ts
                         ? `${cashLabel(status.last_cash_kind)} ${fmtUsd(status.last_cash_amount)} · ${fmtTime(status.last_cash_ts)}`
-                        : "ждём первое пополнение счёта"
+                        : "база тени после первого снимка счёта"
                     }
                   />
                   {stats ? (
                     <>
-                      <Meta k="Win rate Live" v={fmtPct(stats.win_rate)} hint="Не KPI. Turtle часто около 40%." />
+                      <Meta k="Доля плюсовых" v={fmtPct(stats.win_rate)} hint="Доля прибыльных закрытых Live. У Donchian обычно низкая." />
                       <Meta k="Сделок Live" v={String(stats.trades)} hint={`${stats.wins} плюс / ${stats.losses} минус`} />
                     </>
                   ) : null}
                 </CardContent>
               </Card>
 
-              {symbols.map((s) => (
-                <Card key={s.symbol} size="sm">
-                  <CardHeader>
-                    <CardTitle>{s.symbol}</CardTitle>
-                    <CardDescription>{fmtPx(s.last_price)}</CardDescription>
-                    <CardAction>
-                      <Badge variant={s.paused ? "outline" : "secondary"}>{s.paused ? "пауза ls5" : "активен"}</Badge>
-                    </CardAction>
-                  </CardHeader>
-                  <CardContent className="grid gap-2 text-sm sm:grid-cols-2">
-                    <Meta k="Live" v={sideLabel(s.position)} />
-                    <Meta k="Тень ls5" v={sideLabel(s.shadow_ls5)} />
-                    <Meta k="Объём" v={s.qty ? String(s.qty) : "—"} />
-                    <Meta k="Без паузы" v={sideLabel(s.shadow_baseline)} />
-                    <Meta k="Вход" v={fmtPx(s.entry)} />
-                    <Meta k="Стоп" v={fmtPx(s.stop)} />
-                    <Meta k="Убытки подряд" v={`${s.consec_losses} / ${s.shadow_consec_ls5}`} hint="Live / тень. На 5-м — пауза." />
-                    <Meta k="Последняя свеча" v={`${fmtTime(s.last_bar_time)} · ${s.bars} шт.`} />
-                  </CardContent>
-                </Card>
-              ))}
+              <Card>
+                <CardHeader>
+                  <CardTitle>Рынки</CardTitle>
+                  <CardDescription>Позиции Live и тени по каждому инструменту.</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {symbols.length === 0 ? (
+                    <QuietEmpty title="Рынков нет" text="Список появится, когда бот поднимет инструменты." />
+                  ) : (
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Рынок</TableHead>
+                          <TableHead>Цена</TableHead>
+                          <TableHead>Live</TableHead>
+                          <TableHead>Тень</TableHead>
+                          <TableHead>Объём</TableHead>
+                          <TableHead>Вход</TableHead>
+                          <TableHead>Стоп</TableHead>
+                          <TableHead>Убытки</TableHead>
+                          <TableHead>Статус</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {symbols.map((s) => (
+                          <TableRow key={s.symbol}>
+                            <TableCell className="font-medium">{s.symbol}</TableCell>
+                            <TableCell>{fmtPx(s.last_price)}</TableCell>
+                            <TableCell>{sideLabel(s.position)}</TableCell>
+                            <TableCell>{sideLabel(s.shadow_ls5)}</TableCell>
+                            <TableCell className="tabular-nums">{fmtQty(s.qty)}</TableCell>
+                            <TableCell>{fmtPx(s.entry)}</TableCell>
+                            <TableCell>{fmtPx(s.stop)}</TableCell>
+                            <TableCell className="tabular-nums">
+                              {s.consec_losses} / {s.shadow_consec_ls5}
+                            </TableCell>
+                            <TableCell>
+                              <Badge variant={s.paused ? "outline" : "secondary"}>{pauseLabel(s)}</Badge>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  )}
+                </CardContent>
+              </Card>
 
               <Card>
                 <CardHeader>
                   <CardTitle>История Live</CardTitle>
-                  <CardDescription>
-                    Открытые сейчас и последние закрытые. Полный журнал со всеми книгами — во вкладке «Сделки».
-                  </CardDescription>
+                  <CardDescription>Открытые сейчас и последние закрытые. Полный журнал — во вкладке «Сделки».</CardDescription>
                 </CardHeader>
                 <CardContent>
-                  {liveTrades.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">Сделок Live ещё нет.</p>
+                  {overviewLive.length === 0 ? (
+                    <QuietEmpty title="Сделок Live ещё нет" text="Donchian на часе входит редко. Пусто в первые сутки — нормально." />
                   ) : (
                     <Table>
                       <TableHeader>
@@ -517,12 +539,12 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
                           <TableHead>Когда</TableHead>
                           <TableHead>Сделка</TableHead>
                           <TableHead>Статус</TableHead>
-                          <TableHead>Ход</TableHead>
-                          <TableHead className="text-right">Net</TableHead>
+                          <TableHead>Цена</TableHead>
+                          <TableHead className="text-right">Итог</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {[...openLive, ...liveTrades.filter((t) => t.outcome && t.outcome !== "open")].slice(0, 12).map((t) => (
+                        {overviewLive.map((t) => (
                           <TableRow key={`ov-${t.id}`}>
                             <TableCell>{fmtTime(t.entry_time || t.signal_time)}</TableCell>
                             <TableCell>
@@ -533,10 +555,7 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
                                 {outcomeLabel(t.outcome)}
                               </Badge>
                             </TableCell>
-                            <TableCell>
-                              {fmtPx(t.entry_px_live || t.entry_price)}
-                              {t.exit_px_live || t.exit_price ? ` → ${fmtPx(t.exit_px_live || t.exit_price)}` : " → …"}
-                            </TableCell>
+                            <TableCell>{pricePath(t)}</TableCell>
                             <TableCell className={cn("text-right tabular-nums", t.net < 0 && "text-destructive")}>
                               {fmtUsd(t.net)}
                             </TableCell>
@@ -551,13 +570,11 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
               <Card>
                 <CardHeader>
                   <CardTitle>Расхождения</CardTitle>
-                  <CardDescription>
-                    Вход, который был только у Live или только у тени. Старые строки до починки SDK можно не трогать.
-                  </CardDescription>
+                  <CardDescription>Вход, который был только у Live или только у тени.</CardDescription>
                 </CardHeader>
                 <CardContent>
                   {mismatches.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">Пока пусто — так и должно быть.</p>
+                    <QuietEmpty title="Расхождений нет" text="Так и должно быть, если Live повторяет тень." />
                   ) : (
                     <Table>
                       <TableHeader>
@@ -576,7 +593,7 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
                             </TableCell>
                             <TableCell>{m.symbol}</TableCell>
                             <TableCell>{fmtTime(m.signal_time)}</TableCell>
-                            <TableCell className="max-w-56 truncate text-muted-foreground">{m.note}</TableCell>
+                            <TableCell className="max-w-56 truncate text-muted-foreground">{m.note || "—"}</TableCell>
                           </TableRow>
                         ))}
                       </TableBody>
@@ -587,36 +604,33 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
 
               <Card>
                 <CardHeader>
-                  <CardTitle>Kill-switch</CardTitle>
-                  <CardDescription>
-                    Только руками, если сломалось исполнение. Не из-за дня, недели или win rate.
-                  </CardDescription>
+                  <CardTitle>Аварийный стоп</CardTitle>
+                  <CardDescription>Только руками, если сломалось исполнение.</CardDescription>
                 </CardHeader>
                 <CardFooter className="justify-end">
                   {status.kill_switch ? (
                     <Button disabled={busy} onClick={() => void resume()}>
                       {busy ? <Spinner data-icon="inline-start" /> : null}
-                      Снять kill-switch
+                      Снять стоп
                     </Button>
                   ) : (
                     <AlertDialog>
                       <AlertDialogTrigger asChild>
                         <Button variant="destructive" disabled={busy}>
-                          Закрыть позиции и стопнуть входы
+                          Закрыть позиции и остановить входы
                         </Button>
                       </AlertDialogTrigger>
                       <AlertDialogContent>
                         <AlertDialogHeader>
-                          <AlertDialogTitle>Закрыть Live и включить стоп?</AlertDialogTitle>
+                          <AlertDialogTitle>Закрыть Live и остановить входы?</AlertDialogTitle>
                           <AlertDialogDescription>
-                            Все позиции на бирже закроются. Новые входы не пойдут. Тень продолжит считать сигналы — её
-                            это не выключает.
+                            Все позиции на бирже закроются. Новые входы не пойдут. Тень продолжит считать сигналы.
                           </AlertDialogDescription>
                         </AlertDialogHeader>
                         <AlertDialogFooter>
                           <AlertDialogCancel>Отмена</AlertDialogCancel>
                           <AlertDialogAction variant="destructive" onClick={() => void kill()}>
-                            Да, стопнуть
+                            Да, остановить
                           </AlertDialogAction>
                         </AlertDialogFooter>
                       </AlertDialogContent>
@@ -629,9 +643,9 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
             <TabsContent value="trades" className="flex flex-col gap-4">
               {stats ? (
                 <div className="grid gap-3 sm:grid-cols-4">
-                  <StatCard title="Сделок Live" value={String(stats.trades)} sub={`${stats.wins} / ${stats.losses}`} />
-                  <StatCard title="Net Live" value={fmtUsd(stats.net)} warn={stats.net < 0} />
-                  <StatCard title="Profit factor" value={stats.profit_factor.toFixed(2)} />
+                  <StatCard title="Сделок Live" value={String(stats.trades)} sub={`${stats.wins} плюс / ${stats.losses} минус`} />
+                  <StatCard title="Итог Live" value={fmtUsd(stats.net)} warn={stats.net < 0} />
+                  <StatCard title="Профит-фактор" value={stats.profit_factor.toFixed(2)} />
                   <StatCard title="Просадка" value={fmtPct(stats.max_dd)} />
                 </div>
               ) : null}
@@ -639,50 +653,65 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
               <Card>
                 <CardHeader>
                   <CardTitle>Журнал</CardTitle>
-                  <CardDescription>
-                    Live — биржа. Тень ls5 — тот же сигнал на бумаге. «Без паузы» — эталон без ls5. Открытые сверху.
-                  </CardDescription>
-                  <CardAction>
-                    <ToggleGroup
-                      type="single"
-                      size="sm"
-                      variant="outline"
-                      value={bookFilter}
-                      onValueChange={(v) => {
-                        if (v) setBookFilter(v as BookFilter);
-                      }}
-                    >
-                      <ToggleGroupItem value="all">все</ToggleGroupItem>
-                      <ToggleGroupItem value="live">Live</ToggleGroupItem>
-                      <ToggleGroupItem value="shadow_ls5">тень</ToggleGroupItem>
-                      <ToggleGroupItem value="shadow_baseline">без паузы</ToggleGroupItem>
-                    </ToggleGroup>
-                  </CardAction>
+                  <CardDescription>Live — биржа. Тень — тот же сигнал на бумаге. «Без паузы» — тень без паузы после убытков. Открытые сверху.</CardDescription>
                 </CardHeader>
-                <CardContent>
+                <CardContent className="flex flex-col gap-3">
+                  <div className="flex flex-wrap gap-4">
+                    <Field>
+                      <FieldTitle id="book-label">Счёт</FieldTitle>
+                      <ToggleGroup
+                        type="single"
+                        size="sm"
+                        variant="outline"
+                        value={bookFilter}
+                        aria-labelledby="book-label"
+                        onValueChange={(v) => {
+                          if (v) setBookFilter(v as BookFilter);
+                        }}
+                      >
+                        <ToggleGroupItem value="all">все</ToggleGroupItem>
+                        <ToggleGroupItem value="live">Live</ToggleGroupItem>
+                        <ToggleGroupItem value="shadow_ls5">тень</ToggleGroupItem>
+                        <ToggleGroupItem value="shadow_baseline">без паузы</ToggleGroupItem>
+                      </ToggleGroup>
+                    </Field>
+                    <Field>
+                      <FieldTitle id="trade-sym-label">Рынок</FieldTitle>
+                      <ToggleGroup
+                        type="single"
+                        size="sm"
+                        variant="outline"
+                        value={symFilter}
+                        aria-labelledby="trade-sym-label"
+                        onValueChange={(v) => {
+                          if (v) setSymFilter(v);
+                        }}
+                      >
+                        <ToggleGroupItem value="ALL">все</ToggleGroupItem>
+                        {symbols.map((s) => (
+                          <ToggleGroupItem key={s.symbol} value={s.symbol}>
+                            {s.symbol}
+                          </ToggleGroupItem>
+                        ))}
+                      </ToggleGroup>
+                    </Field>
+                  </div>
                   {shownTrades.length === 0 ? (
-                    <Empty className="border border-dashed">
-                      <EmptyHeader>
-                        <EmptyTitle>Сделок пока нет</EmptyTitle>
-                        <EmptyDescription>
-                          Donchian на часе редко входит. Пустой журнал в первые сутки — норма.
-                        </EmptyDescription>
-                      </EmptyHeader>
-                    </Empty>
+                    <QuietEmpty title="Сделок пока нет" text="Donchian на часе входит редко. Пустой журнал в первые сутки — нормально." />
                   ) : (
                     <Table>
                       <TableHeader>
                         <TableRow>
                           <TableHead>Когда</TableHead>
-                          <TableHead>Книга</TableHead>
+                          <TableHead>Счёт</TableHead>
                           <TableHead>Сделка</TableHead>
                           <TableHead>Статус</TableHead>
                           <TableHead>Вход → выход</TableHead>
                           <TableHead>Стоп</TableHead>
-                          <TableHead>Qty</TableHead>
+                          <TableHead>Объём</TableHead>
                           <TableHead>Тень</TableHead>
-                          <TableHead className="text-right">Net</TableHead>
-                          <TableHead className="text-right">Funding</TableHead>
+                          <TableHead className="text-right">Итог</TableHead>
+                          <TableHead className="text-right">Фандинг</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
@@ -698,12 +727,9 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
                                 {outcomeLabel(t.outcome)}
                               </Badge>
                             </TableCell>
-                            <TableCell>
-                              {fmtPx(t.entry_px_live || t.entry_price)}
-                              {t.exit_px_live || t.exit_price ? ` → ${fmtPx(t.exit_px_live || t.exit_price)}` : " → …"}
-                            </TableCell>
+                            <TableCell>{pricePath(t)}</TableCell>
                             <TableCell>{fmtPx(t.stop)}</TableCell>
-                            <TableCell className="tabular-nums">{t.quantity || "—"}</TableCell>
+                            <TableCell className="tabular-nums">{fmtQty(t.quantity)}</TableCell>
                             <TableCell className="text-muted-foreground">
                               {t.entry_px_shadow ? fmtPx(t.entry_px_shadow) : "—"}
                               {t.exit_px_shadow ? ` → ${fmtPx(t.exit_px_shadow)}` : ""}
@@ -723,8 +749,7 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
                 {liveTrades.length > 0 ? (
                   <CardFooter>
                     <p className="text-xs text-muted-foreground">
-                      {liveTrades.filter((t) => t.outcome && t.outcome !== "open").length} закрытых Live из{" "}
-                      {liveTrades.length}
+                      {closedLive.length} закрытых Live из {liveTrades.length}
                     </p>
                   </CardFooter>
                 ) : null}
@@ -735,21 +760,18 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
               <Card>
                 <CardHeader>
                   <CardTitle>Состояние бота</CardTitle>
-                  <CardDescription>
-                    Вердикт считается по совпадению с тенью, не по знаку дня. Красная неделя сама по себе — не повод
-                    выключать.
-                  </CardDescription>
+                  <CardDescription>Вердикт считается по совпадению с тенью, не по знаку дня.</CardDescription>
                 </CardHeader>
                 <CardContent className="grid gap-3 text-sm sm:grid-cols-2">
                   <Meta k="Сеть" v={networkLabel(status.network, status.dry_run)} />
-                  <Meta k="Kill-switch" v={status.kill_switch ? "включён" : "выкл"} />
-                  <Meta k="Вердикт" v={status.verdict} />
+                  <Meta k="Аварийный стоп" v={status.kill_switch ? "включён" : "выкл"} />
+                  <Meta k="Вердикт" v={verdictLabel(status.verdict)} />
                   <Meta
-                    k="Слои A / B / C"
+                    k="Входы / исполнение / PnL"
                     v={`${checkLabel(status.status_a)} · ${checkLabel(status.status_b)} · ${checkLabel(status.status_c)}`}
                   />
-                  <Meta k="Стрим" v={status.ws_connected ? "подключён" : status.ws_error || "молчит, REST ещё торгует"} />
-                  <Meta k="Аптайм" v={`${Math.floor(status.uptime_sec / 60)} мин`} />
+                  <Meta k="Стрим" v={status.ws_connected ? "подключён" : status.ws_error || "нет, REST ещё торгует"} />
+                  <Meta k="Аптайм" v={fmtUptime(status.uptime_sec)} />
                   <Meta k="Старт Live" v={fmtTime(status.go_live_ts)} />
                   <Meta k="Свободно" v={fmtUsd(status.available)} />
                   <Meta k="Последняя ошибка" v={status.last_error || "нет"} />
@@ -761,11 +783,11 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
                   <CardHeader>
                     <CardTitle>Последний суточный отчёт</CardTitle>
                     <CardDescription>
-                      {daily.date_utc} UTC · {daily.verdict}. Тот же текст уходит в Telegram после 23:00 UTC.
+                      {daily.date_utc} UTC · {verdictLabel(daily.verdict)}. Тот же текст уходит в Telegram.
                     </CardDescription>
                   </CardHeader>
                   <CardContent>
-                    <pre className="max-h-80 overflow-auto whitespace-pre-wrap text-xs text-muted-foreground">
+                    <pre className="max-h-80 overflow-auto rounded-lg bg-muted/40 p-3 whitespace-pre-wrap text-xs text-muted-foreground">
                       {daily.body}
                     </pre>
                   </CardContent>
@@ -775,11 +797,11 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
               <Card>
                 <CardHeader>
                   <CardTitle>Касса</CardTitle>
-                  <CardDescription>Пополнения и выводы, которые бот увидел по кошельку. Тень копирует те же суммы.</CardDescription>
+                  <CardDescription>Пополнения и выводы по кошельку. Тень копирует те же суммы.</CardDescription>
                 </CardHeader>
                 <CardContent>
                   {cashFlows.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">Пока нет записей — будет seed с первого equity.</p>
+                    <QuietEmpty title="Записей нет" text="Появятся после первого снимка счёта или перевода." />
                   ) : (
                     <Table>
                       <TableHeader>
@@ -813,7 +835,7 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
                 </CardHeader>
                 <CardContent>
                   {events.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">Журнал пуст.</p>
+                    <QuietEmpty title="Журнал пуст" text="Сюда попадут входы, ошибки и системные сообщения." />
                   ) : (
                     <div className="flex flex-col gap-3">
                       {events.slice(0, 40).map((e, i) => (
@@ -821,7 +843,8 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
                           <div className="flex items-center gap-2 text-xs text-muted-foreground">
                             <span>{fmtTime(e.ts)}</span>
                             <Badge variant={e.level === "error" ? "destructive" : "outline"}>
-                              {e.level} · {e.kind}
+                              {eventLevelLabel(e.level)}
+                              {e.kind ? ` · ${eventKindLabel(e.kind)}` : ""}
                             </Badge>
                           </div>
                           <p className="whitespace-pre-wrap text-sm">{e.message}</p>
@@ -861,6 +884,18 @@ function pct3(n: number) {
   return `${(n * 100).toFixed(1)}%`;
 }
 
+function pricePath(t: Trade) {
+  const entry = fmtPx(t.entry_px_live || t.entry_price);
+  const exit = t.exit_px_live || t.exit_price;
+  return exit ? `${entry} → ${fmtPx(exit)}` : `${entry} → …`;
+}
+
+function pauseLabel(s: SymbolSnap) {
+  if (!s.paused) return "активен";
+  if (s.pause_until_time) return `пауза до ${fmtTime(s.pause_until_time)}`;
+  return "пауза";
+}
+
 function checkVariant(v: string): "default" | "secondary" | "destructive" | "outline" {
   switch (v) {
     case "red":
@@ -876,8 +911,7 @@ function checkVariant(v: string): "default" | "secondary" | "destructive" | "out
 
 function VerdictBadge({ verdict }: { verdict: string }) {
   const variant = verdict === "STOP" ? "destructive" : verdict === "INVESTIGATE" ? "outline" : "secondary";
-  const label = verdict === "STOP" ? "стоп" : verdict === "INVESTIGATE" ? "разобрать" : "сходится";
-  return <Badge variant={variant}>{label}</Badge>;
+  return <Badge variant={variant}>{verdictLabel(verdict)}</Badge>;
 }
 
 function Hint({ text }: { text: string }) {
@@ -890,6 +924,20 @@ function Hint({ text }: { text: string }) {
       </TooltipTrigger>
       <TooltipContent>{text}</TooltipContent>
     </Tooltip>
+  );
+}
+
+function QuietEmpty({ title, text }: { title: string; text: string }) {
+  return (
+    <Empty className="border border-dashed">
+      <EmptyHeader>
+        <EmptyMedia variant="icon">
+          <ActivityIcon />
+        </EmptyMedia>
+        <EmptyTitle>{title}</EmptyTitle>
+        <EmptyDescription>{text}</EmptyDescription>
+      </EmptyHeader>
+    </Empty>
   );
 }
 

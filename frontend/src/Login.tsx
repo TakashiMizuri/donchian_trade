@@ -30,7 +30,7 @@ export default function Login({ onOk }: { onOk: () => void }) {
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle>Donchian</CardTitle>
-          <CardDescription>Дашборд бота на Lighter. Live и тень на одних свечах.</CardDescription>
+          <CardDescription>Дашборд бота. Live и тень на одних свечах.</CardDescription>
         </CardHeader>
         <CardContent>
           <form id="login" onSubmit={submit}>
@@ -45,7 +45,7 @@ export default function Login({ onOk }: { onOk: () => void }) {
                   aria-invalid={err ? true : undefined}
                   onChange={(e) => setPassword(e.target.value)}
                 />
-                <FieldDescription>Тот же, что DASHBOARD_PASSWORD в .env</FieldDescription>
+                <FieldDescription>Пароль дашборда из настроек бота.</FieldDescription>
                 {err ? <FieldError>{err}</FieldError> : null}
               </Field>
             </FieldGroup>

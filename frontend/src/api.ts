@@ -225,3 +225,21 @@ export function fmtBps(n: number) {
   if (!Number.isFinite(n)) return "—";
   return `${n.toFixed(1)} б.п.`;
 }
+
+export function fmtQty(n: number) {
+  if (!n) return "—";
+  return n.toLocaleString("en-US", { maximumFractionDigits: 6 });
+}
+
+export function fmtUptime(sec: number) {
+  if (!sec || sec < 0) return "—";
+  if (sec < 60) return `${Math.floor(sec)} с`;
+  const m = Math.floor(sec / 60);
+  if (m < 60) return `${m} мин`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  if (h < 24) return rm ? `${h} ч ${rm} мин` : `${h} ч`;
+  const d = Math.floor(h / 24);
+  const rh = h % 24;
+  return rh ? `${d} д ${rh} ч` : `${d} д`;
+}

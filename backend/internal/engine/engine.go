@@ -53,7 +53,9 @@ type Engine struct {
 
 func New(cfg *config.Config, st *store.Store, httpc *lighter.HTTPClient, signer *lighter.Signer, markets map[string]lighter.MarketMeta, ntf notify.Notifier, rg *risk.Guard, log *slog.Logger) *Engine {
 	live := strategy.DefaultConfig()
+	live.FeeRate = cfg.FeeRate
 	base := strategy.DefaultConfig()
+	base.FeeRate = cfg.FeeRate
 	base.LS5.Enabled = false
 	idBy := map[string]uint16{}
 	symBy := map[uint16]string{}
@@ -407,7 +409,7 @@ func (e *Engine) executeEntry(ctx context.Context, symbol string, st *strategy.S
 	}
 	_ = e.Store.InsertOrder(ctx, symbol, clientIdx, "entry", "sent", false, act.Price, 0, qty, res.TxHash)
 	e.setOrderIdx(symbol, clientIdx, 0)
-	e.recordEntryFill(ctx, symbol, id, clientIdx, res.TxHash, act.Price, qty)
+	e.recordEntryFill(ctx, symbol, id, clientIdx, res.TxHash, act.Price)
 	slIdx, err := e.Store.NextClientOrderIndex(ctx)
 	if err != nil {
 		return err
@@ -608,6 +610,7 @@ func (e *Engine) ensureStop(ctx context.Context, symbol string, st strategy.Stat
 	meta := e.Markets[symbol]
 	orders, err := e.HTTP.ActiveOrders(ctx, e.Cfg.AccountIndex, meta.MarketID)
 	if err != nil {
+		e.alert(ctx, "warn", "watchdog", symbol+" cannot list orders: "+err.Error())
 		return
 	}
 	hasSL := false
