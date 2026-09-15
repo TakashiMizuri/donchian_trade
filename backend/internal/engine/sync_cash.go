@@ -21,9 +21,9 @@ func accountNumbers(acc *lighter.Account) (eq, wallet, upnl float64) {
 	if eq <= 0 {
 		eq = acc.Collateral
 	}
-	wallet = acc.Collateral
-	if wallet <= 0 {
-		wallet = eq - upnl
+	wallet = SettledWallet(eq, upnl)
+	if abs64(wallet) < 1e-9 && acc.Collateral > 0 {
+		wallet = acc.Collateral
 	}
 	return eq, wallet, upnl
 }
@@ -41,16 +41,20 @@ func (e *Engine) openFeeEstimate(ctx context.Context) float64 {
 	if err != nil {
 		return 0
 	}
-	fee := e.liveCfg.FeeRate
-	if fee <= 0 {
-		fee = 0.0005
-	}
 	sum := 0.0
 	for _, r := range rows {
 		if r.Outcome.String != "open" {
 			continue
 		}
-		sum += r.Quantity.Float64 * r.EntryPrice.Float64 * fee
+		if r.EntryFee.Float64 > 0 {
+			sum += r.EntryFee.Float64
+			continue
+		}
+		px := r.EntryPxLive
+		if px <= 0 {
+			px = r.EntryPrice.Float64
+		}
+		sum += modelFee(r.Quantity.Float64, px, e.liveCfg.FeeRate)
 	}
 	return sum
 }
@@ -68,7 +72,6 @@ func (e *Engine) applyExchangeSnapshot(ctx context.Context, acc *lighter.Account
 	}
 	e.mu.Unlock()
 	e.markFunding(acc)
-	e.syncCash(ctx, acc)
 	e.persistOpenFunding(ctx)
 }
 

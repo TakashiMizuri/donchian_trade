@@ -29,6 +29,27 @@ func TestResidualCashNewEntryFee(t *testing.T) {
 	}
 }
 
+func TestResidualCashLighterEntrySettled(t *testing.T) {
+	// Lighter Collateral often stays put; settled equity drops by the taker fee.
+	if g := ResidualCash(10000, 9993.31, 0, 0, 0, 6.69); abs(g) > 0.01 {
+		t.Fatalf("settled+openFees should cancel, got %v", g)
+	}
+}
+
+func TestResidualCashCloseAfterJournal(t *testing.T) {
+	// Open already took $6.69 fee out of settled; close net −112.70 includes that fee.
+	// Settled therefore moves by net + entry fee = −106.01.
+	if g := ResidualCash(9993.31, 9887.30, 0, -112.70, 6.69, 0); abs(g) > 0.02 {
+		t.Fatalf("close after journal should be 0, got %v", g)
+	}
+}
+
+func TestSettledWalletIgnoresMark(t *testing.T) {
+	if g := SettledWallet(10100, 100); abs(g-10000) > 1e-9 {
+		t.Fatalf("settled %v", g)
+	}
+}
+
 func TestResidualCashMarkMoveIgnored(t *testing.T) {
 	// wallet unchanged when only uPnL moves
 	if g := ResidualCash(9900, 9900, 10, 10, 0, 0); abs(g) > 0.01 {

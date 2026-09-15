@@ -179,6 +179,7 @@ func (e *Engine) Bootstrap(ctx context.Context) error {
 	acc, err := e.HTTP.Account(ctx, e.Cfg.AccountIndex)
 	if err == nil && acc != nil {
 		e.applyExchangeSnapshot(ctx, acc)
+		e.syncCash(ctx, acc)
 	}
 	g, _ := e.Store.LoadGlobal(ctx)
 	e.mu.Lock()
@@ -595,6 +596,8 @@ func (e *Engine) Reconcile(ctx context.Context) {
 		e.persistSymbol(ctx, p.sym, st, e.bars[p.sym])
 		e.mu.Unlock()
 	}
+	// After local SL closes so realized/open-fees line up with the exchange snapshot.
+	e.syncCash(ctx, acc)
 	e.snapshotBooks(ctx, "fill")
 }
 
