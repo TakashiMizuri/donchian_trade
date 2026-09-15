@@ -1,5 +1,10 @@
 import { FormEvent, useState } from "react";
 import { api } from "./api";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Spinner } from "@/components/ui/spinner";
 
 export default function Login({ onOk }: { onOk: () => void }) {
   const [password, setPassword] = useState("");
@@ -21,26 +26,38 @@ export default function Login({ onOk }: { onOk: () => void }) {
   }
 
   return (
-    <div className="min-h-dvh flex items-center justify-center px-5">
-      <form onSubmit={submit} className="w-full max-w-sm rounded-2xl bg-slate-900/80 border border-slate-700 p-6 shadow-xl">
-        <h1 className="text-xl font-semibold mb-1">Donchian Live</h1>
-        <p className="text-slate-400 text-sm mb-5">Дашборд алго-бота на Lighter</p>
-        <label className="block text-sm text-slate-300 mb-2">Пароль дашборда</label>
-        <input
-          type="password"
-          autoComplete="current-password"
-          className="w-full rounded-xl bg-slate-800 border border-slate-600 px-3 py-3 text-base outline-none focus:border-sky-400"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-        />
-        {err && <p className="text-rose-400 text-sm mt-3">{err}</p>}
-        <button
-          disabled={busy}
-          className="mt-5 w-full rounded-xl bg-sky-500 hover:bg-sky-400 disabled:opacity-50 py-3 font-medium text-slate-950"
-        >
-          {busy ? "Входим…" : "Войти"}
-        </button>
-      </form>
+    <div className="flex min-h-dvh items-center justify-center px-4">
+      <Card className="w-full max-w-sm">
+        <CardHeader>
+          <CardTitle>Donchian</CardTitle>
+          <CardDescription>Дашборд бота на Lighter. Live и тень на одних свечах.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form id="login" onSubmit={submit}>
+            <FieldGroup>
+              <Field data-invalid={err ? true : undefined}>
+                <FieldLabel htmlFor="dashboard-password">Пароль</FieldLabel>
+                <Input
+                  id="dashboard-password"
+                  type="password"
+                  autoComplete="current-password"
+                  value={password}
+                  aria-invalid={err ? true : undefined}
+                  onChange={(e) => setPassword(e.target.value)}
+                />
+                <FieldDescription>Тот же, что DASHBOARD_PASSWORD в .env</FieldDescription>
+                {err ? <FieldError>{err}</FieldError> : null}
+              </Field>
+            </FieldGroup>
+          </form>
+        </CardContent>
+        <CardFooter>
+          <Button type="submit" form="login" className="w-full" disabled={busy}>
+            {busy ? <Spinner data-icon="inline-start" /> : null}
+            {busy ? "Входим…" : "Войти"}
+          </Button>
+        </CardFooter>
+      </Card>
     </div>
   );
 }

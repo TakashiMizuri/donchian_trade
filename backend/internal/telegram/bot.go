@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,7 +15,8 @@ import (
 	"time"
 
 	"donchian.trade/bot/internal/engine"
-	"donchian.trade/bot/internal/telemetry"
+	"donchian.trade/bot/internal/notify"
+	"donchian.trade/bot/internal/plot"
 )
 
 type Bot struct {
@@ -39,17 +41,55 @@ func New(token string, chatIDs []int64, eng *engine.Engine, hb time.Duration, lo
 	}
 	return &Bot{
 		Token: token, Allowed: allow, Engine: eng, Log: log,
-		HTTP: &http.Client{Timeout: 35 * time.Second}, hbEvery: hb,
+		HTTP: &http.Client{Timeout: 45 * time.Second}, hbEvery: hb,
 	}
 }
 
 func (b *Bot) Alert(_ context.Context, level, kind, message string) {
+	if b.Token == "" || kind == "daily" {
+		return
+	}
+	text := formatAlert(level, kind, message)
+	b.broadcastHTML(text)
+}
+
+func (b *Bot) Report(ctx context.Context, mail notify.ReportMail) {
 	if b.Token == "" {
 		return
 	}
-	text := fmt.Sprintf("[%s/%s]\n%s", strings.ToUpper(level), kind, message)
+	date := mail.Date
+	if date == "" {
+		date = time.Now().UTC().Format("2006-01-02")
+	}
+	sn := b.Engine.Snapshot(ctx)
+	rows, _ := b.Engine.Store.ListTrades(ctx, 80)
+	html := mail.HTML
+	if html == "" {
+		html = formatDailyHTML(date, sn, rows)
+	}
+	caption := dailyCaption(date, sn.Verdict)
+	png := mail.PNG
+	if len(png) == 0 {
+		png = b.equityPNG(ctx)
+	}
 	for id := range b.Allowed {
-		if err := b.send(id, text); err != nil {
+		if len(png) > 0 {
+			if err := b.sendPhoto(id, png, caption); err != nil {
+				b.Log.Warn("telegram photo", "err", err)
+			}
+		}
+		if html == "" {
+			continue
+		}
+		if err := b.sendHTML(id, html); err != nil {
+			b.Log.Warn("telegram report", "err", err)
+		}
+	}
+}
+
+func (b *Bot) broadcastHTML(text string) {
+	for id := range b.Allowed {
+		if err := b.sendHTML(id, text); err != nil {
 			b.Log.Warn("telegram send", "err", err)
 		}
 	}
@@ -60,7 +100,7 @@ func (b *Bot) Run(ctx context.Context) {
 		b.Log.Info("telegram disabled (no token)")
 		return
 	}
-	b.Alert(ctx, "info", "boot", "Donchian bot online")
+	b.Alert(ctx, "info", "boot", "Donchian онлайн")
 	go b.heartbeat(ctx)
 	for {
 		if ctx.Err() != nil {
@@ -89,7 +129,7 @@ func (b *Bot) heartbeat(ctx context.Context) {
 			b.mu.Unlock()
 			if silent >= b.hbEvery {
 				ok, detail := b.Engine.Health()
-				b.Alert(ctx, "info", "heartbeat", fmt.Sprintf("alive health=%v (%s)", ok, detail))
+				b.Alert(ctx, "info", "heartbeat", fmt.Sprintf("жив, здоровье=%v (%s)", ok, detail))
 			}
 		}
 	}
@@ -144,7 +184,7 @@ func (b *Bot) poll(ctx context.Context) error {
 		}
 		chat := up.Message.Chat.ID
 		if !b.Allowed[chat] && !b.Allowed[up.Message.From.ID] {
-			_ = b.send(chat, "unauthorized")
+			_ = b.sendHTML(chat, "Этот чат не в списке. Напишите свой chat id в TELEGRAM_CHAT_IDS.")
 			continue
 		}
 		b.handle(ctx, chat, strings.TrimSpace(up.Message.Text))
@@ -153,51 +193,86 @@ func (b *Bot) poll(ctx context.Context) error {
 }
 
 func (b *Bot) handle(ctx context.Context, chat int64, text string) {
-	cmd := strings.Split(text, "@")[0]
-	switch strings.ToLower(strings.TrimSpace(cmd)) {
+	cmd := strings.ToLower(strings.TrimSpace(strings.Split(text, "@")[0]))
+	switch cmd {
 	case "/start", "/help":
-		_ = b.send(chat, "Команды:\n/health — проверка\n/status — снимок\n/report — Live vs Shadow §17\n/kill — аварийно закрыть всё\n/resume — снять kill-switch")
+		_ = b.sendHTML(chat, formatHelp())
 	case "/health":
 		ok, detail := b.Engine.Health()
-		_ = b.send(chat, fmt.Sprintf("health=%v\n%s", ok, detail))
+		_ = b.sendHTML(chat, formatHealth(ok, detail))
 	case "/status":
-		sn := b.Engine.Snapshot(ctx)
-		var sb strings.Builder
-		ratio := "NA"
-		if sn.PnLRatioOK {
-			ratio = fmt.Sprintf("%.2f", sn.PnLRatioXF)
-		}
-		fmt.Fprintf(&sb, "net=%s kill=%v dry=%v ws=%v\nverdict %s  A=%s B=%s C=%s\nlive=%.2f  shadow_ls5=%.2f  gap=%+.2f\ncash_base=%.2f last_cash=%s %+.2f\nratio_xf=%s  match=%.3f  slip_med=%.1fbps\n",
-			sn.Network, sn.KillSwitch, sn.DryRun, sn.WSConnected,
-			sn.Verdict, sn.StatusA, sn.StatusB, sn.StatusC,
-			sn.Equity, sn.EquityShadowLS5, sn.GapUSD,
-			sn.CashBase, sn.LastCashKind, sn.LastCashAmount,
-			ratio, sn.MatchRateLTD, sn.SideSlipMedianBps)
-		for _, s := range sn.Symbols {
-			fmt.Fprintf(&sb, "%s live=%s sh=%s px=%.2f losses=%d/%d\n", s.Symbol, s.Position, s.ShadowLS5, s.LastPrice, s.ConsecLosses, s.ShadowConsecLS5)
-		}
-		_ = b.send(chat, sb.String())
-	case "/report":
-		rep := b.Engine.ComputeReport(ctx)
-		_ = b.send(chat, telemetry.FormatDaily(time.Now().UTC().Format("2006-01-02"), rep, ""))
-	case "/kill":
-		if err := b.Engine.KillAll(ctx); err != nil {
-			_ = b.send(chat, "kill error: "+err.Error())
+		_ = b.sendHTML(chat, formatStatus(b.Engine.Snapshot(ctx)))
+	case "/trades":
+		rows, err := b.Engine.Store.ListTrades(ctx, 40)
+		if err != nil {
+			_ = b.sendHTML(chat, "Не удалось прочитать сделки: "+htmlEsc(err.Error()))
 			return
 		}
-		_ = b.send(chat, "kill-switch ON, positions flattened")
+		_ = b.sendHTML(chat, formatTrades(rows, 10))
+	case "/report":
+		b.sendDaily(ctx, chat, time.Now().UTC().Format("2006-01-02"))
+	case "/kill":
+		if err := b.Engine.KillAll(ctx); err != nil {
+			_ = b.sendHTML(chat, "<b>Kill-switch</b> · ошибка\n"+htmlEsc(err.Error()))
+			return
+		}
+		_ = b.sendHTML(chat, "<b>Kill-switch</b>\nLive закрыт, новые входы запрещены. Тень считает дальше.")
 	case "/resume":
 		b.Engine.Resume(ctx)
-		_ = b.send(chat, "kill-switch OFF")
+		_ = b.sendHTML(chat, "<b>Kill-switch снят</b>\nНовые входы снова разрешены.")
 	default:
-		_ = b.send(chat, "unknown. /help")
+		_ = b.sendHTML(chat, "Не знаю эту команду. /help")
 	}
 }
 
-func (b *Bot) send(chat int64, text string) error {
+func (b *Bot) sendDaily(ctx context.Context, chat int64, date string) {
+	sn := b.Engine.Snapshot(ctx)
+	rows, _ := b.Engine.Store.ListTrades(ctx, 80)
+	html := formatDailyHTML(date, sn, rows)
+	caption := dailyCaption(date, sn.Verdict)
+	if png := b.equityPNG(ctx); len(png) > 0 {
+		if err := b.sendPhoto(chat, png, caption); err != nil {
+			b.Log.Warn("telegram photo", "err", err)
+		}
+	}
+	if err := b.sendHTML(chat, html); err != nil {
+		b.Log.Warn("telegram report", "err", err)
+	}
+}
+
+func (b *Bot) equityPNG(ctx context.Context) []byte {
+	curve, err := b.Engine.Store.ListCurve(ctx, 2000)
+	if err != nil || len(curve) < 2 {
+		return nil
+	}
+	live := make([]float64, len(curve))
+	sh := make([]float64, len(curve))
+	for i, p := range curve {
+		live[i] = p.EquityLive
+		sh[i] = p.EquityShadowLS5
+	}
+	png, err := plot.EquityPNG(live, sh)
+	if err != nil {
+		return nil
+	}
+	return png
+}
+
+func (b *Bot) sendHTML(chat int64, text string) error {
+	for _, chunk := range splitTelegram(text, 3500) {
+		if err := b.sendChunk(chat, chunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b *Bot) sendChunk(chat int64, text string) error {
 	payload, _ := json.Marshal(map[string]any{
-		"chat_id": chat,
-		"text":    text,
+		"chat_id":                  chat,
+		"text":                     text,
+		"parse_mode":               "HTML",
+		"disable_web_page_preview": true,
 	})
 	u := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", b.Token)
 	resp, err := b.HTTP.Post(u, "application/json", bytes.NewReader(payload))
@@ -211,10 +286,78 @@ func (b *Bot) send(chat int64, text string) error {
 	if !wrap.OK {
 		return fmt.Errorf("sendMessage: %s", wrap.Desc)
 	}
+	b.touch()
+	return nil
+}
+
+func (b *Bot) sendPhoto(chat int64, png []byte, caption string) error {
+	if len(caption) > 1000 {
+		caption = caption[:1000]
+	}
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	_ = w.WriteField("chat_id", strconv.FormatInt(chat, 10))
+	_ = w.WriteField("caption", caption)
+	_ = w.WriteField("parse_mode", "HTML")
+	fw, err := w.CreateFormFile("photo", "equity.png")
+	if err != nil {
+		return err
+	}
+	if _, err := fw.Write(png); err != nil {
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+	u := fmt.Sprintf("https://api.telegram.org/bot%s/sendPhoto", b.Token)
+	req, err := http.NewRequest(http.MethodPost, u, &buf)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	resp, err := b.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var wrap tgResp
+	_ = json.Unmarshal(body, &wrap)
+	if !wrap.OK {
+		return fmt.Errorf("sendPhoto: %s", wrap.Desc)
+	}
+	b.touch()
+	return nil
+}
+
+func (b *Bot) touch() {
 	b.mu.Lock()
 	b.lastSend = time.Now()
 	b.mu.Unlock()
-	return nil
+}
+
+func splitTelegram(s string, max int) []string {
+	s = strings.TrimSpace(s)
+	if len(s) <= max {
+		return []string{s}
+	}
+	var out []string
+	for len(s) > max {
+		cut := strings.LastIndex(s[:max], "\n")
+		if cut < max/2 {
+			cut = max
+		}
+		out = append(out, strings.TrimSpace(s[:cut]))
+		s = strings.TrimSpace(s[cut:])
+	}
+	if s != "" {
+		out = append(out, s)
+	}
+	return out
+}
+
+func htmlEsc(s string) string {
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
 }
 
 func ParseIDs(s string) []int64 {

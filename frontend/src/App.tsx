@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "./api";
 import Dashboard from "./Dashboard";
 import Login from "./Login";
+import { Spinner } from "@/components/ui/spinner";
 
 export default function App() {
   const [authed, setAuthed] = useState<boolean | null>(null);
@@ -14,7 +15,11 @@ export default function App() {
   }, []);
 
   if (authed === null) {
-    return <div className="min-h-dvh flex items-center justify-center text-slate-400">Загрузка…</div>;
+    return (
+      <div className="flex min-h-dvh items-center justify-center">
+        <Spinner />
+      </div>
+    );
   }
   if (!authed) {
     return <Login onOk={() => setAuthed(true)} />;

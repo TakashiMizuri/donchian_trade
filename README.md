@@ -105,8 +105,8 @@ curl "https://api.telegram.org/bot<TOKEN>/getUpdates"
 4. Пропишите `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_IDS` (можно несколько через запятую).  
 5. Чужие чаты бот игнорирует.
 
-Команды: `/health`, `/status`, `/report`, `/kill`, `/resume`, `/help`.  
-Heartbeat — если бот молчал `TELEGRAM_HEARTBEAT_MINUTES` минут. `/report` — суточный снимок §17 (verdict не из знака PnL).
+Команды: `/health`, `/status`, `/trades` (последние 10 Live), `/report` (суточный снимок + график), `/kill`, `/resume`, `/help`.  
+Раз в сутки после закрытия часа **23:00 UTC** бот сам шлёт тот же отчёт с графиком Live vs тень. Heartbeat — если бот молчал `TELEGRAM_HEARTBEAT_MINUTES` минут. Вердикт в отчёте **не** из знака PnL.
 
 ---
 
@@ -142,7 +142,7 @@ nano .env
 | `TELEGRAM_CHAT_IDS` | whitelist | `123456789` |
 | `TELEGRAM_HEARTBEAT_MINUTES` | 0 = выкл | `60` |
 | `DRY_RUN` | не слать ордера (отладка) | `false` |
-| `WEB_PORT` | порт дашборда на хосте | `8080` |
+| `WEB_PORT` | порт дашборда на хосте | `80` (`http://IP/`) |
 | `DOMAIN` | для профиля `tls` | `bot.example.com` |
 
 Параметры стратегии (N=30, M=15, ATR=20 SMA-TR, stop 1.5, ls5) **зашиты в код**. Это заморозка research.
@@ -179,13 +179,13 @@ sudo ufw default allow outgoing
 sudo ufw allow OpenSSH
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
-# если дашборд без Caddy, на время отладки:
-sudo ufw allow 8080/tcp
 sudo ufw enable
 sudo ufw status
 ```
 
-Не открывайте 8080 в интернет надолго без HTTPS и сильного пароля.
+Не публикуйте дашборд без пароля. HTTP на 80 нормален для testnet; для телефона лучше HTTPS (ниже).
+
+Откройте на телефоне `http://IP_VPS/` (порт 80), введите `DASHBOARD_PASSWORD`.
 
 ### 6.4 Код
 
@@ -215,35 +215,27 @@ docker compose logs -f bot
 - `market symbol=BTC id=…`
 - `bootstrapped symbol=BTC bars=…` (сотни/тысячи 1h свечей)
 - `http listen`
-- Telegram: `Donchian bot online` (если токен задан)
+- Telegram: `Donchian онлайн` (если токен задан)
 
 Проверка API с VPS:
 
 ```bash
-curl -s http://127.0.0.1:8080/api/health
-# с хоста web проксирует /api:
-curl -s http://127.0.0.1:8080/api/health
+curl -s http://127.0.0.1/api/health
 ```
 
-Откройте на телефоне `http://IP_VPS:8080` (или домен), введите `DASHBOARD_PASSWORD`.
+Откройте на телефоне `http://IP_VPS/` (или домен), введите `DASHBOARD_PASSWORD`. Если порт занят — в `.env` поставьте `WEB_PORT=8080` и ходите на `:8080`.
 
 ### 6.6 HTTPS (рекомендуется для телефона)
 
 1. DNS: A-запись `bot.example.com` → IP VPS.
-2. В `.env`: `DOMAIN=bot.example.com` и `COOKIE_SECURE=true`.
+2. В `.env`: `DOMAIN=bot.example.com`, `COOKIE_SECURE=true`, `WEB_PORT=8080` (чтобы 80 остался Caddy).
 3. Запуск с Caddy:
 
 ```bash
 docker compose --profile tls up -d --build
 ```
 
-Caddy сам получит Let's Encrypt. После этого закройте 8080:
-
-```bash
-sudo ufw delete allow 8080/tcp
-```
-
-Дашборд: `https://bot.example.com`.
+Caddy сам получит Let's Encrypt. 80 и 443 тогда у Caddy, дашборд: `https://bot.example.com`.
 
 ---
 

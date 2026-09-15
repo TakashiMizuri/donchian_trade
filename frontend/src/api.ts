@@ -99,6 +99,8 @@ export type Trade = {
   outcome: string;
   quantity: number;
   gross: number;
+  entry_fee?: number;
+  exit_fee?: number;
   net: number;
   funding: number;
   consec_losses: number;
@@ -136,6 +138,15 @@ export type Mismatch = {
 };
 
 export type EventRow = { ts: number; level: string; kind: string; message: string };
+export type CashFlow = {
+  id: number;
+  ts: number;
+  amount: number;
+  kind: string;
+  live_equity: number;
+  note: string;
+};
+export type DailyReport = { date_utc: string; body: string; verdict: string };
 export type Stats = {
   trades: number;
   wins: number;
@@ -173,6 +184,8 @@ export const api = {
   events: () => req<EventRow[]>("/api/events"),
   telemetry: () => req<Report>("/api/telemetry"),
   mismatches: () => req<Mismatch[]>("/api/mismatches"),
+  cash: () => req<{ cash_base: number; flows: CashFlow[] }>("/api/cash"),
+  report: () => req<DailyReport>("/api/report"),
   kill: () => req<{ ok: string }>("/api/kill", { method: "POST" }),
   resume: () => req<{ ok: string }>("/api/resume", { method: "POST" }),
 };
@@ -183,14 +196,32 @@ export function fmtPx(n: number) {
 }
 
 export function fmtUsd(n: number) {
-  return n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 });
+  return n.toLocaleString("ru-RU", { style: "currency", currency: "USD", maximumFractionDigits: 2 });
+}
+
+export function fmtUsdCompact(n: number) {
+  const abs = Math.abs(n);
+  const sign = n < 0 ? "−" : "";
+  if (abs >= 1_000_000) return `${sign}$${(abs / 1_000_000).toFixed(1)}M`;
+  if (abs >= 10_000) return `${sign}$${Math.round(abs / 1000)}k`;
+  return fmtUsd(n);
 }
 
 export function fmtTime(sec: number) {
   if (!sec) return "—";
-  return new Date(sec * 1000).toLocaleString();
+  return new Date(sec * 1000).toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 export function fmtPct(n: number) {
   return `${(n * 100).toFixed(1)}%`;
+}
+
+export function fmtBps(n: number) {
+  if (!Number.isFinite(n)) return "—";
+  return `${n.toFixed(1)} б.п.`;
 }

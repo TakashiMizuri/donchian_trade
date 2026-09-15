@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"time"
 
+	"donchian.trade/bot/internal/notify"
+	"donchian.trade/bot/internal/plot"
 	"donchian.trade/bot/internal/store"
 	"donchian.trade/bot/internal/strategy"
 	"donchian.trade/bot/internal/telemetry"
@@ -262,10 +264,33 @@ func (e *Engine) WriteDailyReport(ctx context.Context, date string) {
 	dir := filepath.Join(e.dataDir(), "reports")
 	_ = os.MkdirAll(dir, 0o755)
 	_ = os.WriteFile(filepath.Join(dir, date+".txt"), []byte(body), 0o644)
-	e.Notify.Alert(ctx, "info", "daily", body)
+	_ = e.Store.InsertEvent(ctx, "info", "daily", "суточный отчёт "+date+" · "+rep.Verdict, nil)
+	e.Notify.Report(ctx, notify.ReportMail{
+		Date:    date,
+		Caption: "Суточный отчёт " + date + " UTC",
+		PNG:     e.equityPNG(ctx),
+	})
 	if t, err := time.Parse("2006-01-02", date); err == nil && t.Weekday() == time.Sunday {
 		e.weeklyReplay(ctx)
 	}
+}
+
+func (e *Engine) equityPNG(ctx context.Context) []byte {
+	curve, err := e.Store.ListCurve(ctx, 2000)
+	if err != nil || len(curve) < 2 {
+		return nil
+	}
+	live := make([]float64, len(curve))
+	sh := make([]float64, len(curve))
+	for i, p := range curve {
+		live[i] = p.EquityLive
+		sh[i] = p.EquityShadowLS5
+	}
+	png, err := plot.EquityPNG(live, sh)
+	if err != nil {
+		return nil
+	}
+	return png
 }
 
 func (e *Engine) weeklyReplay(ctx context.Context) {
