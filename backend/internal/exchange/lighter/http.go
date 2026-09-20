@@ -367,7 +367,10 @@ func (c *HTTPClient) ActiveOrders(ctx context.Context, accountIndex int64, marke
 	q.Set("market_id", strconv.Itoa(int(marketID)))
 	b, err := c.get(ctx, "/api/v1/accountActiveOrders", q, true)
 	if err != nil {
-		// fallback name used in some SDK versions
+		// 401 is a bad token, not a wrong path. /api/v1/orders does not exist (404).
+		if authHTTPError(err) {
+			return nil, err
+		}
 		b2, err2 := c.get(ctx, "/api/v1/orders", q, true)
 		if err2 != nil {
 			return nil, fmt.Errorf("active orders: %v / %v", err, err2)
@@ -533,6 +536,14 @@ func boolField(m map[string]any, keys ...string) bool {
 		}
 	}
 	return false
+}
+
+func authHTTPError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "HTTP 401") || strings.Contains(s, "expired token") || strings.Contains(s, "20013")
 }
 
 func ScalePrice(px float64, decimals int) uint32 {

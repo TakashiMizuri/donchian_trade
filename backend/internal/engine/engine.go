@@ -49,6 +49,9 @@ type Engine struct {
 	slIdx        map[string]int64
 	fundingBasis map[string]float64
 	fundingLast  map[string]float64
+
+	alertMu sync.Mutex
+	alertAt map[string]time.Time
 }
 
 func New(cfg *config.Config, st *store.Store, httpc *lighter.HTTPClient, signer *lighter.Signer, markets map[string]lighter.MarketMeta, ntf notify.Notifier, rg *risk.Guard, log *slog.Logger) *Engine {
@@ -77,12 +80,33 @@ func New(cfg *config.Config, st *store.Store, httpc *lighter.HTTPClient, signer 
 		lastPrice: map[string]float64{}, lastBar: map[string]int64{}, busy: map[string]bool{},
 		entryIdx: map[string]int64{}, slIdx: map[string]int64{},
 		fundingBasis: map[string]float64{}, fundingLast: map[string]float64{},
+		alertAt: map[string]time.Time{},
 		started: time.Now(), liveCfg: live, baseCfg: base,
 	}
 }
 
+const alertRepeatEvery = time.Hour
+
+func SuppressRepeat(at map[string]time.Time, now time.Time, window time.Duration, level, kind, msg string) bool {
+	if (level != "warn" && level != "error") || at == nil {
+		return false
+	}
+	key := kind + "\n" + msg
+	if t, ok := at[key]; ok && now.Sub(t) < window {
+		return true
+	}
+	at[key] = now
+	return false
+}
+
 func (e *Engine) alert(ctx context.Context, level, kind, msg string) {
 	e.Log.Info(msg, "level", level, "kind", kind)
+	e.alertMu.Lock()
+	skip := SuppressRepeat(e.alertAt, time.Now(), alertRepeatEvery, level, kind, msg)
+	e.alertMu.Unlock()
+	if skip {
+		return
+	}
 	_ = e.Store.InsertEvent(ctx, level, kind, msg, nil)
 	e.Notify.Alert(ctx, level, kind, msg)
 	g, _ := e.Store.LoadGlobal(ctx)

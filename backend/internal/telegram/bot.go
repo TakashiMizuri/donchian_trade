@@ -29,6 +29,7 @@ type Bot struct {
 	mu       sync.Mutex
 	lastSend time.Time
 	hbEvery  time.Duration
+	alertAt  map[string]time.Time
 }
 
 func New(token string, chatIDs []int64, eng *engine.Engine, hb time.Duration, log *slog.Logger) *Bot {
@@ -41,12 +42,22 @@ func New(token string, chatIDs []int64, eng *engine.Engine, hb time.Duration, lo
 	}
 	return &Bot{
 		Token: token, Allowed: allow, Engine: eng, Log: log,
-		HTTP: &http.Client{Timeout: 45 * time.Second}, hbEvery: hb,
+		HTTP:    &http.Client{Timeout: 45 * time.Second},
+		hbEvery: hb, alertAt: map[string]time.Time{},
 	}
 }
 
 func (b *Bot) Alert(_ context.Context, level, kind, message string) {
 	if b.Token == "" || kind == "daily" {
+		return
+	}
+	b.mu.Lock()
+	if b.alertAt == nil {
+		b.alertAt = map[string]time.Time{}
+	}
+	skip := engine.SuppressRepeat(b.alertAt, time.Now(), time.Hour, level, kind, message)
+	b.mu.Unlock()
+	if skip {
 		return
 	}
 	text := formatAlert(level, kind, message)

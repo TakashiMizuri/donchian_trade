@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 
 	lighterclient "github.com/elliottech/lighter-go/client"
@@ -14,10 +15,19 @@ import (
 	"github.com/elliottech/lighter-go/types/txtypes"
 )
 
+const (
+	authTokenTTL    = 7 * time.Hour
+	authRefreshSkew = 10 * time.Minute
+)
+
 type Signer struct {
 	Tx   *lighterclient.TxClient
 	HTTP *HTTPClient
 	Meta map[string]MarketMeta
+
+	tokMu  sync.Mutex
+	token  string
+	tokExp time.Time
 }
 
 func NewSigner(httpClient *HTTPClient, privKey string, accountIndex int64, apiKeyIndex uint8, chainID uint32) (*Signer, error) {
@@ -29,7 +39,24 @@ func NewSigner(httpClient *HTTPClient, privKey string, accountIndex int64, apiKe
 }
 
 func (s *Signer) AuthToken() (string, error) {
-	return s.Tx.GetAuthToken(time.Time{})
+	now := time.Now()
+	s.tokMu.Lock()
+	defer s.tokMu.Unlock()
+	if s.token != "" && tokenFresh(now, s.tokExp) {
+		return s.token, nil
+	}
+	deadline := now.Add(authTokenTTL)
+	tok, err := s.Tx.GetAuthToken(deadline)
+	if err != nil {
+		return "", err
+	}
+	s.token = tok
+	s.tokExp = deadline
+	return tok, nil
+}
+
+func tokenFresh(now, exp time.Time) bool {
+	return now.Add(authRefreshSkew).Before(exp)
 }
 
 type OrderResult struct {
