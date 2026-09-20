@@ -35,10 +35,13 @@ type CashFlow struct {
 }
 
 type CashWatch struct {
-	Inited       bool    `json:"inited"`
-	LastWallet   float64 `json:"last_wallet"`
-	LastRealized float64 `json:"last_realized"`
-	LastOpenFees float64 `json:"last_open_fees"`
+	Inited          bool    `json:"inited"`
+	LastWallet      float64 `json:"last_wallet"`
+	LastRealized    float64 `json:"last_realized"`
+	LastOpenFees    float64 `json:"last_open_fees"`
+	LastRealizedXF  float64 `json:"last_realized_xf"`
+	LastFunding     float64 `json:"last_funding"`
+	FundingTracked  bool    `json:"funding_tracked"`
 }
 
 func (s *Store) LoadCashWatch(ctx context.Context) (CashWatch, error) {

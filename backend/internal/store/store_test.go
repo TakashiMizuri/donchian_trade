@@ -57,9 +57,20 @@ func TestStoreRoundTrip(t *testing.T) {
 	if err := s.InsertCurve(ctx, CurvePoint{TS: 100, Reason: "bar", EquityLive: 10000, EquityShadowLS5: 10000}); err != nil {
 		t.Fatal(err)
 	}
+	for i := 0; i < 5; i++ {
+		if err := s.InsertCurve(ctx, CurvePoint{TS: int64(200 + i), Reason: "fill", EquityLive: 10001}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.InsertCurve(ctx, CurvePoint{TS: 300, Reason: "bar", EquityLive: 10100, EquityShadowLS5: 10100}); err != nil {
+		t.Fatal(err)
+	}
 	pts, err := s.ListCurve(ctx, 10)
-	if err != nil || len(pts) != 1 {
-		t.Fatalf("curve %v %v", pts, err)
+	if err != nil || len(pts) != 2 {
+		t.Fatalf("curve want 2 bars, got %d err=%v", len(pts), err)
+	}
+	if pts[0].Reason != "bar" || pts[1].EquityLive != 10100 {
+		t.Fatalf("curve %+v", pts)
 	}
 	if err := s.SaveCashWatch(ctx, CashWatch{Inited: true, LastWallet: 10000}); err != nil {
 		t.Fatal(err)

@@ -71,7 +71,9 @@ func (e *Engine) applyExchangeSnapshot(ctx context.Context, acc *lighter.Account
 
 func (e *Engine) syncCash(ctx context.Context, acc *lighter.Account) {
 	eq, wallet, _ := accountNumbers(acc)
-	realized, _, _, _ := e.Store.SumNet(ctx, telemetry.BookLive)
+	realized, _, fundingAll, _ := e.Store.SumNet(ctx, telemetry.BookLive)
+	closedFund, _ := e.Store.SumClosedFunding(ctx, telemetry.BookLive)
+	realizedXF := realized - closedFund
 	openFees := e.openFeeEstimate(ctx)
 	watch, err := e.Store.LoadCashWatch(ctx)
 	if err != nil {
@@ -80,10 +82,12 @@ func (e *Engine) syncCash(ctx context.Context, acc *lighter.Account) {
 	}
 	minUSD := e.Cfg.CashFlowMinUSD
 	if !watch.Inited {
-		watch = store.CashWatch{Inited: true, LastWallet: wallet, LastRealized: realized, LastOpenFees: openFees}
+		watch = store.CashWatch{
+			Inited: true, LastWallet: wallet, LastRealized: realized, LastOpenFees: openFees,
+			LastRealizedXF: realizedXF, LastFunding: fundingAll, FundingTracked: true,
+		}
 		_ = e.Store.SaveCashWatch(ctx, watch)
-		// wallet − realized + openFees = deposits/withdrawals to date (works on upgrade too)
-		implied := wallet - realized + openFees
+		implied := wallet - realizedXF - fundingAll + openFees
 		if abs64(implied) < cashThreshold(minUSD, eq) {
 			implied = eq
 		}
@@ -92,16 +96,55 @@ func (e *Engine) syncCash(ctx context.Context, acc *lighter.Account) {
 		}
 		return
 	}
-	flow := ResidualCash(watch.LastWallet, wallet, watch.LastRealized, realized, watch.LastOpenFees, openFees)
+	if !watch.FundingTracked {
+		e.reverseCloseDustOnce(ctx, acc, eq)
+		watch.FundingTracked = true
+		watch.LastWallet = wallet
+		watch.LastRealized = realized
+		watch.LastOpenFees = openFees
+		watch.LastRealizedXF = realizedXF
+		watch.LastFunding = fundingAll
+		_ = e.Store.SaveCashWatch(ctx, watch)
+		return
+	}
+	flow := ResidualCash(watch.LastWallet, wallet, watch.LastRealizedXF, realizedXF, watch.LastOpenFees, openFees, watch.LastFunding, fundingAll)
 	explained := (wallet - watch.LastWallet) - flow
 	watch.LastWallet = wallet
 	watch.LastRealized = realized
 	watch.LastOpenFees = openFees
+	watch.LastRealizedXF = realizedXF
+	watch.LastFunding = fundingAll
 	_ = e.Store.SaveCashWatch(ctx, watch)
 	if abs64(flow) < cashThreshold(minUSD, eq) {
 		return
 	}
 	e.recordCash(ctx, flow, classifyCash(flow), eq, wallet, explained, "auto-detected: live wallet move not explained by trading")
+}
+
+func (e *Engine) reverseCloseDustOnce(ctx context.Context, acc *lighter.Account, eq float64) {
+	flows, err := e.Store.ListCashFlows(ctx, 200)
+	if err != nil {
+		return
+	}
+	maxAbs := cashThreshold(e.Cfg.CashFlowMinUSD, eq) * 6
+	sum := 0.0
+	n := 0
+	for _, f := range flows {
+		if f.Note != "auto-detected: live wallet move not explained by trading" {
+			continue
+		}
+		if !closeDustCash(f.Amount, f.Explained, maxAbs) {
+			continue
+		}
+		sum -= f.Amount
+		n++
+	}
+	if n == 0 || abs64(sum) < 0.01 {
+		return
+	}
+	_, wallet, _ := accountNumbers(acc)
+	e.recordCash(ctx, sum, classifyCash(sum), eq, wallet, 0,
+		fmt.Sprintf("reverse: %d close residual(s) were funding/mark dust, not a transfer", n))
 }
 
 func (e *Engine) recordCash(ctx context.Context, amount float64, kind string, liveEq, wallet, explained float64, note string) {

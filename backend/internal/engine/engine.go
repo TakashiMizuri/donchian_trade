@@ -624,7 +624,9 @@ func (e *Engine) Reconcile(ctx context.Context) {
 	}
 	// After local SL closes so realized/open-fees line up with the exchange snapshot.
 	e.syncCash(ctx, acc)
-	e.snapshotBooks(ctx, "fill")
+	if len(pending) > 0 {
+		e.snapshotBooks(ctx, "fill")
+	}
 }
 
 func (e *Engine) ensureStop(ctx context.Context, symbol string, st strategy.State) {

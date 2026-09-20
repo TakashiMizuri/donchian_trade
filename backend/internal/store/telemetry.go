@@ -137,12 +137,20 @@ func (s *Store) ListCurve(ctx context.Context, limit int) ([]CurvePoint, error) 
 	if limit <= 0 {
 		limit = 2000
 	}
+	pts, err := s.listCurveWhere(ctx, limit, `reason IN ('bar','boot')`)
+	if err != nil || len(pts) > 0 {
+		return pts, err
+	}
+	return s.listCurveWhere(ctx, limit, `1=1`)
+}
+
+func (s *Store) listCurveWhere(ctx context.Context, limit int, where string) ([]CurvePoint, error) {
 	rows, err := s.DB.QueryContext(ctx, `
 SELECT ts, reason, equity_live, equity_live_ex_funding, upnl_live, wallet_cash,
   equity_shadow_ls5, equity_shadow_baseline, gap_vs_ls5, cum_funding, cum_fees_live, cum_fees_shadow_ls5,
   match_rate_ltd, side_slip_median_ltd_bps, verdict
 FROM (
-  SELECT * FROM equity_curve ORDER BY id DESC LIMIT ?
+  SELECT * FROM equity_curve WHERE `+where+` ORDER BY id DESC LIMIT ?
 ) ORDER BY ts ASC, id ASC`, limit)
 	if err != nil {
 		return nil, err
@@ -218,6 +226,14 @@ FROM trades WHERE profile=?`
 	}
 	err = s.DB.QueryRowContext(ctx, q, args...).Scan(&net, &fees, &funding)
 	return
+}
+
+func (s *Store) SumClosedFunding(ctx context.Context, profile string) (float64, error) {
+	var n sql.NullFloat64
+	err := s.DB.QueryRowContext(ctx, `
+SELECT COALESCE(SUM(CASE WHEN outcome NOT IN ('open','rejected') THEN funding ELSE 0 END),0)
+FROM trades WHERE profile=?`, profile).Scan(&n)
+	return n.Float64, err
 }
 
 func (s *Store) OpenBookTrade(ctx context.Context, symbol, profile string) (*TradeRow, error) {

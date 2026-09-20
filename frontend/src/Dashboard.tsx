@@ -136,24 +136,7 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
     return () => clearInterval(id);
   }, []);
 
-  const chart = useMemo(() => {
-    const cutoff = rangeCutoff(range);
-    return equity
-      .filter((p) => p.ts >= cutoff)
-      .map((p) => ({
-        t: new Date(p.ts * 1000).toLocaleString("ru-RU", {
-          day: "2-digit",
-          month: "2-digit",
-          hour: "2-digit",
-          minute: "2-digit",
-        }),
-        live: p.equity_live,
-        live_xf: p.equity_live_ex_funding,
-        ls5: p.equity_shadow_ls5,
-        base: p.equity_shadow_baseline,
-        gap: p.gap_vs_ls5,
-      }));
-  }, [equity, range]);
+  const chart = useMemo(() => buildChart(equity, range), [equity, range]);
 
   const liveTrades = useMemo(() => trades.filter((t) => t.profile === "live"), [trades]);
   const openLive = useMemo(
@@ -346,7 +329,7 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
                         variant="outline"
                         value={extras}
                         aria-labelledby="extra-label"
-                        onValueChange={setExtras}
+                        onValueChange={(v) => setExtras(v ?? [])}
                       >
                         <ToggleGroupItem value="base">тень без паузы</ToggleGroupItem>
                         <ToggleGroupItem value="xf">без фандинга</ToggleGroupItem>
@@ -354,7 +337,11 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
                     </Field>
                   </div>
                   {hasChart ? (
-                    <ChartContainer config={equityConfig} className="aspect-auto h-64 w-full">
+                    <>
+                      <p className="text-xs text-muted-foreground">
+                        {RANGE_LABEL[range]} · {chart.length} точек
+                      </p>
+                      <ChartContainer key={`eq-${range}-${showBase}-${showXF}`} config={equityConfig} className="aspect-auto h-64 w-full">
                       <LineChart accessibilityLayer data={chart}>
                         <CartesianGrid vertical={false} />
                         <XAxis dataKey="t" tickLine={false} axisLine={false} minTickGap={28} tickMargin={8} />
@@ -389,6 +376,7 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
                         ) : null}
                       </LineChart>
                     </ChartContainer>
+                    </>
                   ) : (
                     <QuietEmpty
                       title="Кривой ещё нет"
@@ -405,7 +393,7 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
                 </CardHeader>
                 <CardContent>
                   {hasChart ? (
-                    <ChartContainer config={gapConfig} className="aspect-auto h-36 w-full">
+                    <ChartContainer key={`gap-${range}`} config={gapConfig} className="aspect-auto h-36 w-full">
                       <LineChart accessibilityLayer data={chart}>
                         <CartesianGrid vertical={false} />
                         <XAxis dataKey="t" tickLine={false} axisLine={false} minTickGap={28} tickMargin={8} />
@@ -877,6 +865,36 @@ function rangeCutoff(r: Range): number {
     default:
       return 0;
   }
+}
+
+function buildChart(equity: CurvePoint[], range: Range) {
+  const cutoff = rangeCutoff(range);
+  const byTs = new Map<number, CurvePoint>();
+  for (const p of equity) {
+    if (p.ts < cutoff) continue;
+    const prev = byTs.get(p.ts);
+    if (!prev || p.reason === "bar" || (p.reason === "boot" && prev.reason === "fill")) {
+      byTs.set(p.ts, p);
+    }
+  }
+  const rows = [...byTs.values()].sort((a, b) => a.ts - b.ts);
+  const max = 720;
+  const step = rows.length > max ? Math.ceil(rows.length / max) : 1;
+  return rows
+    .filter((_, i) => i % step === 0 || i === rows.length - 1)
+    .map((p) => ({
+      t: new Date(p.ts * 1000).toLocaleString("ru-RU", {
+        day: "2-digit",
+        month: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
+      live: p.equity_live,
+      live_xf: p.equity_live_ex_funding,
+      ls5: p.equity_shadow_ls5,
+      base: p.equity_shadow_baseline,
+      gap: p.gap_vs_ls5,
+    }));
 }
 
 function pct3(n: number) {
