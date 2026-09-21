@@ -41,6 +41,7 @@ type Engine struct {
 	wsErr       string
 	started     time.Time
 	liveCfg     strategy.Config
+	ls5Cfg      strategy.Config
 	baseCfg     strategy.Config
 	lastVerdict string
 
@@ -55,11 +56,9 @@ type Engine struct {
 }
 
 func New(cfg *config.Config, st *store.Store, httpc *lighter.HTTPClient, signer *lighter.Signer, markets map[string]lighter.MarketMeta, ntf notify.Notifier, rg *risk.Guard, log *slog.Logger) *Engine {
-	live := strategy.DefaultConfig()
-	live.FeeRate = cfg.FeeRate
-	base := strategy.DefaultConfig()
-	base.FeeRate = cfg.FeeRate
-	base.LS5.Enabled = false
+	live := cfg.LiveConfig()
+	ls5 := cfg.ShadowLS5Config()
+	base := cfg.BaselineConfig()
 	idBy := map[string]uint16{}
 	symBy := map[uint16]string{}
 	for s, m := range markets {
@@ -81,7 +80,7 @@ func New(cfg *config.Config, st *store.Store, httpc *lighter.HTTPClient, signer 
 		entryIdx: map[string]int64{}, slIdx: map[string]int64{},
 		fundingBasis: map[string]float64{}, fundingLast: map[string]float64{},
 		alertAt: map[string]time.Time{},
-		started: time.Now(), liveCfg: live, baseCfg: base,
+		started: time.Now(), liveCfg: live, ls5Cfg: ls5, baseCfg: base,
 	}
 }
 
@@ -134,7 +133,14 @@ func (e *Engine) SetWS(ok bool, err string) {
 }
 
 func (e *Engine) Bootstrap(ctx context.Context) error {
+	if err := e.lockStrategyFingerprint(ctx); err != nil {
+		return err
+	}
 	from := time.Now().Add(-e.Cfg.CandleWarmup)
+	tf := e.Cfg.Timeframe
+	if tf <= 0 {
+		tf = time.Hour
+	}
 	for _, sym := range e.Cfg.Symbols {
 		meta, ok := e.Markets[sym]
 		if !ok {
@@ -146,9 +152,9 @@ func (e *Engine) Bootstrap(ctx context.Context) error {
 		}
 		needFrom := from
 		if len(existing) > 0 {
-			needFrom = time.Unix(existing[len(existing)-1].Time, 0).Add(-2 * time.Hour)
+			needFrom = time.Unix(existing[len(existing)-1].Time, 0).Add(-2 * tf)
 		}
-		fresh, err := e.HTTP.Backfill1h(ctx, meta.MarketID, needFrom)
+		fresh, err := e.HTTP.Backfill(ctx, meta.MarketID, e.Cfg.Resolution, tf, needFrom)
 		if err != nil {
 			return fmt.Errorf("backfill %s: %w", sym, err)
 		}
@@ -159,7 +165,7 @@ func (e *Engine) Bootstrap(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		bars = dropUnclosed(bars, time.Hour)
+		bars = dropUnclosed(bars, tf)
 		e.mu.Lock()
 		e.bars[sym] = bars
 		if len(bars) > 0 {
@@ -296,7 +302,7 @@ func (e *Engine) HandleClosed(ctx context.Context, symbol string, bar strategy.B
 	nextTime := bar.Time + int64(e.Cfg.Timeframe.Seconds())
 
 	if e.Cfg.ShadowLS5 {
-		e.stepBook(ctx, symbol, telemetry.BookLS5, bars, atr, i, nextOpen, nextTime, &ls5, e.liveCfg)
+		e.stepBook(ctx, symbol, telemetry.BookLS5, bars, atr, i, nextOpen, nextTime, &ls5, e.ls5Cfg)
 	}
 	if e.Cfg.ShadowBaseline {
 		e.stepBook(ctx, symbol, telemetry.BookBaseline, bars, atr, i, nextOpen, nextTime, &base, e.baseCfg)
@@ -720,12 +726,31 @@ func (e *Engine) Resume(ctx context.Context) {
 }
 
 func (e *Engine) PollClosedBars(ctx context.Context) {
-	cutoff := time.Now().UTC().Truncate(time.Hour).Unix()
+	tf := e.Cfg.Timeframe
+	if tf <= 0 {
+		tf = time.Hour
+	}
+	res := e.Cfg.Resolution
+	if res == "" {
+		res = "1h"
+	}
+	cutoff := time.Now().UTC().Truncate(tf).Unix()
+	lookback := 6 * time.Hour
+	if lookback < 12*tf {
+		lookback = 12 * tf
+	}
+	countBack := int(lookback/tf) + 2
+	if countBack < 12 {
+		countBack = 12
+	}
+	if countBack > 500 {
+		countBack = 500
+	}
 	for _, sym := range e.Cfg.Symbols {
 		meta := e.Markets[sym]
 		end := time.Now()
-		start := end.Add(-6 * time.Hour)
-		kl, err := e.HTTP.Candles(ctx, meta.MarketID, "1h", start.UnixMilli(), end.UnixMilli(), 12)
+		start := end.Add(-lookback)
+		kl, err := e.HTTP.Candles(ctx, meta.MarketID, res, start.UnixMilli(), end.UnixMilli(), countBack)
 		if err != nil {
 			continue
 		}
@@ -817,7 +842,7 @@ func (e *Engine) Snapshot(ctx context.Context) Snapshot {
 	defer e.mu.Unlock()
 	sn := Snapshot{
 		Network:              string(e.Cfg.Network),
-		Strategy:             "1h_N30_M15_ATR1.5+ls5_cond_brk2.0",
+		Strategy:             e.Cfg.Tag,
 		KillSwitch:           e.Risk.Kill(),
 		DryRun:               e.Cfg.DryRun,
 		WSConnected:          e.wsOK,
@@ -911,4 +936,26 @@ func (e *Engine) LastPrice(symbol string) float64 {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.lastPrice[symbol]
+}
+
+func (e *Engine) lockStrategyFingerprint(ctx context.Context) error {
+	fp := e.Cfg.Fingerprint()
+	old, err := e.Store.LoadKV(ctx, config.FingerprintKey)
+	if err != nil {
+		return err
+	}
+	if old == fp {
+		return nil
+	}
+	if old != "" {
+		return fmt.Errorf("sqlite is frozen as %q but this process is %q — archive data/bot.db and start a new run", old, fp)
+	}
+	has, err := e.Store.HasMarketHistory(ctx)
+	if err != nil {
+		return err
+	}
+	if has {
+		return fmt.Errorf("sqlite already has candles/trades but no strategy fingerprint (old 1h run). Archive data/bot.db before starting %s", e.Cfg.Tag)
+	}
+	return e.Store.SaveKV(ctx, config.FingerprintKey, fp)
 }

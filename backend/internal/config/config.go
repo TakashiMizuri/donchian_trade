@@ -46,6 +46,9 @@ type Config struct {
 	ReconcileEvery    time.Duration
 	WatchdogEvery     time.Duration
 
+	Tag         string
+	Resolution  string // Lighter candle interval: 1h, 30m, 15m, 5m
+	BarSeconds  int
 	ChannelN    int
 	ExitM       int
 	ATRPeriod   int
@@ -53,8 +56,10 @@ type Config struct {
 	RiskPct     float64
 	MaxRiskUSD  float64
 	FeeRate     float64
+	LiveProfile string
 	LS5Enabled  bool
 	LossStreakN int
+	PauseHours  float64
 	PauseBars   int
 	ResumeATR   float64
 	Timeframe   time.Duration
@@ -89,18 +94,9 @@ func Load() (*Config, error) {
 		CandleWarmup:      120 * 24 * time.Hour,
 		ReconcileEvery:    15 * time.Second,
 		WatchdogEvery:     20 * time.Second,
-		ChannelN:          30,
-		ExitM:             15,
-		ATRPeriod:         20,
-		ATRStopMult:       1.5,
-		RiskPct:           1.0,
-		MaxRiskUSD:        1000,
-		FeeRate:           0, // Lighter Standard: 0 maker / 0 taker. Live fills and both shadow books.
-		LS5Enabled:        true,
-		LossStreakN:       5,
-		PauseBars:         24,
-		ResumeATR:         2.0,
-		Timeframe:         time.Hour,
+	}
+	if err := applyStrategyEnv(cfg); err != nil {
+		return nil, err
 	}
 	switch net {
 	case NetworkMainnet:

@@ -1,8 +1,8 @@
 # Donchian Live — автоторговый бот на Lighter
 
-Алго-бот по замороженной стратегии **Donchian / Turtle breakout** `1h_N30_M15_ATR1.5` с live-профилем **`ls5_cond_brk2.0`**.
+Алго-бот по стратегии **Donchian / Turtle breakout**. Профиль **читается из `.env`**. Сейчас default: `30m` · `N=60` · `M=30` · `ATR(40)×1.5` · risk `1%` · cap `$1000` · live **`ls5_cond_brk2.0`**.
 
-Контракт стратегии: [`docs/DONCHIAN_LIVE_STARTPACK.md`](docs/DONCHIAN_LIVE_STARTPACK.md). Менять N/M/ATR/фильтры без нового research **нельзя**. Live vs backtest (три книги, verdict WAIT/STOP): **§17**.
+Контракт механизма: [`docs/DONCHIAN_LIVE_STARTPACK.md`](docs/DONCHIAN_LIVE_STARTPACK.md) + env-порт [`docs/DONCHIAN_LIVE_STARTPACK_30M_ENV.md`](docs/DONCHIAN_LIVE_STARTPACK_30M_ENV.md). Смена TF/N/M — новый run (новый `bot.db`), не «докрутка» старого журнала. Live vs shadow (три книги, verdict WAIT/STOP): **§17**.
 
 | Слой | Стек |
 |------|------|
@@ -18,10 +18,12 @@
 
 ## 0. Что это за стратегия (чтобы не паниковать)
 
-- Пробой 30-периодного канала Дончиана на **1h**, выход по ATR-стопу `1.5×ATR` (SMA of True Range, **не** Wilder) или по обратному каналу `M=15`.
+Простыми словами, с примерами и пайплайном час за часом: [`docs/KAK_RABOTAET_STRATEGIYA.md`](docs/KAK_RABOTAET_STRATEGIYA.md).
+
+- Пробой канала Дончиана на **закрытом баре TF из env** (default 30m, N=60 ≈ те же 30 часов, что 1h N=30). Выход по ATR-стопу `1.5×ATR` (SMA of True Range, **не** Wilder) или по короткому каналу M (default 30).
 - Один слот позиции **на символ** (без пирамиды). BTC и ETH торгуются **независимо**.
-- Сайзинг: **1% equity** на сделку, cap **$1000**.
-- После **5 подряд gross-лоссов** — пауза до 24 часов, ранний выход из паузы если пробой ≥ **2×ATR**.
+- Сайзинг: **1% equity** на сделку, cap **$1000** (оба из env).
+- После **5 подряд gross-лоссов** — пауза **24 часа** (48 баров на 30m), ранний выход из паузы если пробой ≥ **2×ATR**.
 - Ожидаемый профиль: winrate **~25–30%**, max DD часто **−25…−35%**, прибыль от редких runners. Серии мелких −R — норма. Если live показывает WR 55% и крошечный DD — скорее баг порта.
 
 Research считался на Binance. Live идёт на **Lighter**. Свечи и fills не совпадут с backtest — это ожидаемо.
@@ -34,12 +36,12 @@ Research считался на Binance. Live идёт на **Lighter**. Свеч
 Телефон / браузер  →  web (nginx, :8080)  →  /api  →  bot (:8080 внутри сети)
                                            SQLite /data/bot.db
 Telegram Bot API  ←  bot
-Lighter REST + WS ←  bot  (свечи 1h, IOC market, reduce-only stop-loss)
+Lighter REST + WS ←  bot  (свечи из DONCHIAN_TIMEFRAME, IOC market, reduce-only stop-loss)
 ```
 
-Решения принимаются **только на закрытой 1h-свече**. Сразу после close ставится market IOC (это `open` следующего часа из research), затем reduce-only **STOP_LOSS** на бирже. Channel-exit — тоже market reduce-only на следующем open.
+Решения принимаются **только на закрытой свече выбранного TF**. Сразу после close ставится market IOC (это `open` следующего бара), затем reduce-only **STOP_LOSS** на бирже. Channel-exit — тоже market reduce-only на следующем open.
 
-С часа 0 считаются **три книги** на одних и тех же closed 1h futures: **Live** (реальные ордера), **Shadow-ls5** (эталон профиля), **Shadow-baseline** (core без паузы). Канон сверки: Live ls5 ↔ Shadow ls5, то же окно. Не сравнивать месяц live с yearly fee-0 дашбордом / +9%/мес.
+С бара 0 считаются **три книги** на одних и тех же closed futures: **Live**, **Shadow-ls5**, **Shadow-baseline**. Канон сверки: Live ↔ Shadow того же live-профиля, то же окно. Не сравнивать месяц live с yearly fee-0 дашбордом.
 
 **Касса shadow = зеркало счёта.** `START_EQUITY` не задаётся. Первое ненулевое equity на бирже — seed всех трёх книг. Дальше пополнения и выводы детектятся как остаток `Δwallet − PnL − комиссии входа` (у Lighter нет нормальной истории депозитов в trading API) и тем же числом пишутся в shadow. PnL и mark не считаются кэш-флоу.
 
@@ -55,7 +57,7 @@ Lighter REST + WS ←  bot  (свечи 1h, IOC market, reduce-only stop-loss)
 
 ### VPS (Ubuntu 22.04 / 24.04)
 
-- 1–2 vCPU, 2 GB RAM достаточно (1h-бот не HFT)
+- 1–2 vCPU, 2 GB RAM достаточно (бот не HFT)
 - 20+ GB диск
 - Docker Engine + Docker Compose plugin
 - Аккаунт [Lighter](https://app.lighter.xyz) (сначала **testnet**, потом mainnet)
@@ -126,7 +128,15 @@ nano .env
 | `LIGHTER_ACCOUNT_INDEX` | индекс аккаунта | `12345` |
 | `LIGHTER_API_KEY_INDEX` | 2–254 | `2` |
 | `SYMBOLS` | инструменты | `BTC,ETH` |
-| `SHADOW_LS5` | theoretical ls5 с часа 0 | `true` |
+| `DONCHIAN_TIMEFRAME` | свеча Lighter: `1h` `30m` `15m` `5m` | `30m` |
+| `DONCHIAN_CHANNEL_N` | баров входа | `60` |
+| `DONCHIAN_EXIT_M` | баров выхода | `30` |
+| `DONCHIAN_ATR_PERIOD` | SMA-TR | `40` |
+| `DONCHIAN_ATR_STOP_MULT` | стоп = mult × ATR | `1.5` |
+| `DONCHIAN_RISK_PCT` | риск на стоп | `1.0` |
+| `DONCHIAN_MAX_RISK_USD` | cap риска сделки | `1000` |
+| `DONCHIAN_LIVE_PROFILE` | `ls5_cond_brk2.0` или `baseline` | `ls5_cond_brk2.0` |
+| `SHADOW_LS5` | theoretical ls5 с бара 0 | `true` |
 | `SHADOW_BASELINE` | theoretical core без паузы | `true` |
 | `CASH_FLOW_MIN_USD` | порог автодетекта пополнения/вывода | `5` |
 | `MAX_NOTIONAL_USD` | операционный cap номинала | `50000` |
@@ -145,7 +155,7 @@ nano .env
 | `WEB_PORT` | порт дашборда на хосте | `80` (`http://IP/`) |
 | `DOMAIN` | для профиля `tls` | `bot.example.com` |
 
-Параметры стратегии (N=30, M=15, ATR=20 SMA-TR, stop 1.5, ls5) **зашиты в код**. Это заморозка research.
+Параметры стратегии (`DONCHIAN_TIMEFRAME`, N, M, ATR period, stop mult, риск, cap, ls5) читаются из `.env`. Смена TF на уже существующей SQLite запрещена — архивируйте `data/bot.db` и стартуйте новый run.
 
 ---
 
@@ -349,7 +359,7 @@ Telegram `/status` — то же с телефона без браузера.
 | Задача | Как |
 |--------|-----|
 | Рестарт | `docker compose restart bot` — состояние позиции/streak восстанавливается из SQLite + сверка с биржей |
-| Пропущен час (бот лежал) | при старте backfill 1h и REST-poll закрытых баров; вход состоится на **следующем** валидном close, не «догоняется» история ордерами |
+| Пропущен бар (бот лежал) | при старте backfill выбранного TF и REST-poll закрытых баров; вход состоится на **следующем** валидном close, не «догоняется» история ордерами |
 | Kill-switch | дашборд / Telegram `/kill` — flatten всех позиций, новые входы запрещены |
 | Снять kill | `/resume` или кнопка на дашборде |
 | Место на диске | `df -h`, `docker system df`, бэкапы в `backups/` |
@@ -358,7 +368,7 @@ Telegram `/status` — то же с телефона без браузера.
 
 После рестарта бот:
 
-1. Догружает ≥ ~120 дней 1h.
+1. Догружает ≥ ~120 дней свечей выбранного TF.
 2. Читает open trade и ls5-состояние из БД.
 3. Сверяет позицию с Lighter (reconcile каждые ~15 сек). Если стоп пропал — flatten и алерт.
 
@@ -410,7 +420,7 @@ npm run dev
 | Telegram `409 Conflict` | второй polling (ещё один контейнер/процесс с тем же токеном) |
 | Дашборд 401 после HTTPS | `COOKIE_SECURE=true`, заходите именно по `https://` |
 | `warming up` | мало свечей; смотрите логи backfill, firewall исходящий 443 |
-| Бот не видит close часа | WS `candle/{id}/1h` + REST poll каждые 15с; сверьте время UTC |
+| Бот не видит close бара | WS `candle/{id}/{DONCHIAN_TIMEFRAME}` + REST poll каждые 15с; сверьте время UTC |
 | Рассинхрон позиции | Health / Telegram; `/kill` если неясно |
 | WR «слишком хороший» | lookahead / не тот ATR; сверьте тесты `go test ./internal/strategy` |
 

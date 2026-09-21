@@ -152,10 +152,10 @@ func (e *Engine) writeBarLog(ctx context.Context, symbol string, bars []strategy
 	}
 	wantBase := strategy.SignalWant(c, upper, lower)
 	wantLS5 := wantBase
-	pause := e.liveCfg.LS5.Enabled && i < ls5.PauseUntilIdx
+	pause := e.ls5Cfg.LS5.Enabled && i < ls5.PauseUntilIdx
 	resume := true
 	if pause {
-		resume = c > upper+e.liveCfg.LS5.ResumeATR*a || c < lower-e.liveCfg.LS5.ResumeATR*a
+		resume = c > upper+e.ls5Cfg.LS5.ResumeATR*a || c < lower-e.ls5Cfg.LS5.ResumeATR*a
 		if a <= 0 {
 			resume = false
 		}

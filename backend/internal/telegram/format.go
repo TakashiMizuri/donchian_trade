@@ -116,7 +116,7 @@ func formatTrades(rows []store.TradeRow, limit int) string {
 		}
 	}
 	if len(live) == 0 {
-		return "<b>Сделки Live</b>\nПока пусто. Donchian на часе редко входит."
+		return "<b>Сделки Live</b>\nПока пусто. Donchian редко входит."
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "<b>Последние %d Live</b>\n", len(live))

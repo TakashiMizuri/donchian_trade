@@ -18,11 +18,11 @@ import (
 )
 
 type HTTPClient struct {
-	BaseURL    string
-	HTTP       *http.Client
-	AuthToken  string
-	mu         sync.Mutex
-	tokenFn    func(context.Context) (string, error)
+	BaseURL   string
+	HTTP      *http.Client
+	AuthToken string
+	mu        sync.Mutex
+	tokenFn   func(context.Context) (string, error)
 }
 
 func NewHTTP(baseURL string) *HTTPClient {
@@ -231,17 +231,28 @@ func (c *HTTPClient) Candles(ctx context.Context, marketID uint16, resolution st
 	return out, nil
 }
 
-func (c *HTTPClient) Backfill1h(ctx context.Context, marketID uint16, from time.Time) ([]strategy.Bar, error) {
+func (c *HTTPClient) Backfill(ctx context.Context, marketID uint16, resolution string, bar time.Duration, from time.Time) ([]strategy.Bar, error) {
+	if bar <= 0 {
+		bar = time.Hour
+	}
+	if resolution == "" {
+		resolution = "1h"
+	}
+	// Venue /api/v1/candles caps at 500 rows. Keep a window under that.
+	window := bar * 400
+	if window < 24*time.Hour {
+		window = 24 * time.Hour
+	}
 	end := time.Now().UTC()
 	var all []strategy.Bar
 	seen := map[int64]struct{}{}
 	curEnd := end
 	for curEnd.After(from) {
-		start := curEnd.Add(-20 * 24 * time.Hour)
+		start := curEnd.Add(-window)
 		if start.Before(from) {
 			start = from
 		}
-		batch, err := c.Candles(ctx, marketID, "1h", start.UnixMilli(), curEnd.UnixMilli(), 500)
+		batch, err := c.Candles(ctx, marketID, resolution, start.UnixMilli(), curEnd.UnixMilli(), 500)
 		if err != nil {
 			return nil, err
 		}
@@ -256,7 +267,7 @@ func (c *HTTPClient) Backfill1h(ctx context.Context, marketID uint16, from time.
 			seen[b.Time] = struct{}{}
 			all = append(all, b)
 		}
-		curEnd = time.Unix(oldest, 0).UTC().Add(-time.Hour)
+		curEnd = time.Unix(oldest, 0).UTC().Add(-bar)
 		if len(batch) < 2 {
 			break
 		}
@@ -266,23 +277,23 @@ func (c *HTTPClient) Backfill1h(ctx context.Context, marketID uint16, from time.
 }
 
 type Account struct {
-	Index            int64
-	Collateral       float64
-	Available        float64
-	TotalAssetValue  float64
-	Positions        []Position
+	Index           int64
+	Collateral      float64
+	Available       float64
+	TotalAssetValue float64
+	Positions       []Position
 }
 
 type Position struct {
-	MarketID       uint16
-	Symbol         string
-	Sign           int
-	Size           float64
-	AvgEntry       float64
-	UnrealizedPnL  float64
-	PositionValue  float64
-	FundingPaid    float64
-	IM             float64
+	MarketID      uint16
+	Symbol        string
+	Sign          int
+	Size          float64
+	AvgEntry      float64
+	UnrealizedPnL float64
+	PositionValue float64
+	FundingPaid   float64
+	IM            float64
 }
 
 func (c *HTTPClient) Account(ctx context.Context, accountIndex int64) (*Account, error) {

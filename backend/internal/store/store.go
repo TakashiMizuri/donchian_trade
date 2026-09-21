@@ -544,3 +544,28 @@ ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated
 		fmt.Sprintf("%d", next), time.Now().Unix())
 	return next, err
 }
+
+func (s *Store) LoadKV(ctx context.Context, key string) (string, error) {
+	var v string
+	err := s.DB.QueryRowContext(ctx, `SELECT value FROM bot_state WHERE key = ?`, key).Scan(&v)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return v, err
+}
+
+func (s *Store) SaveKV(ctx context.Context, key, value string) error {
+	_, err := s.DB.ExecContext(ctx, `
+INSERT INTO bot_state(key, value, updated_at) VALUES(?, ?, ?)
+ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
+		key, value, time.Now().Unix())
+	return err
+}
+
+func (s *Store) HasMarketHistory(ctx context.Context) (bool, error) {
+	var n int
+	if err := s.DB.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM candles) + (SELECT COUNT(*) FROM trades)`).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}

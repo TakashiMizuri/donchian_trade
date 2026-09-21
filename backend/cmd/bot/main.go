@@ -32,6 +32,7 @@ func main() {
 		log.Error("LIGHTER_API_PRIVATE_KEY is required (or set DRY_RUN=true)")
 		os.Exit(1)
 	}
+	log.Info("strategy profile", cfg.ProfileLog()...)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -94,7 +95,7 @@ func main() {
 	for s, m := range markets {
 		idToSym[m.MarketID] = s
 	}
-	ws := lighter.NewWS(cfg.WSURL, idToSym)
+	ws := lighter.NewWS(cfg.WSURL, idToSym, cfg.Resolution)
 	ws.OnCandle = eng.OnLiveCandle
 	ws.OnState = eng.SetWS
 

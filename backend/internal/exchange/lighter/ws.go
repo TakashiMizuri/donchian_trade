@@ -17,17 +17,21 @@ import (
 type CandleHandler func(marketID uint16, closed *strategy.Bar, live strategy.Bar)
 
 type WS struct {
-	URL       string
-	Markets   map[uint16]string // id → symbol
-	OnCandle  CandleHandler
-	OnState   func(connected bool, err string)
-	mu        sync.Mutex
-	conn      *websocket.Conn
-	closed    map[string]int64 // symbol → last closed bar time
+	URL        string
+	Markets    map[uint16]string // id → symbol
+	Resolution string            // 1h, 30m, ...
+	OnCandle   CandleHandler
+	OnState    func(connected bool, err string)
+	mu         sync.Mutex
+	conn       *websocket.Conn
+	closed     map[string]int64 // symbol → last closed bar time
 }
 
-func NewWS(url string, markets map[uint16]string) *WS {
-	return &WS{URL: url, Markets: markets, closed: map[string]int64{}}
+func NewWS(url string, markets map[uint16]string, resolution string) *WS {
+	if resolution == "" {
+		resolution = "1h"
+	}
+	return &WS{URL: url, Markets: markets, Resolution: resolution, closed: map[string]int64{}}
 }
 
 func (w *WS) Run(ctx context.Context) error {
@@ -72,7 +76,7 @@ func (w *WS) once(ctx context.Context) error {
 		w.OnState(true, "")
 	}
 	for id := range w.Markets {
-		msg := fmt.Sprintf(`{"type":"subscribe","channel":"candle/%d/1h"}`, id)
+		msg := fmt.Sprintf(`{"type":"subscribe","channel":"candle/%d/%s"}`, id, w.Resolution)
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
 			return err
 		}
@@ -115,10 +119,10 @@ func (w *WS) once(ctx context.Context) error {
 }
 
 type wsMsg struct {
-	Type     string      `json:"type"`
-	Channel  string      `json:"channel"`
-	Candles  []CandleRaw `json:"candles"`
-	Error    json.RawMessage
+	Type    string      `json:"type"`
+	Channel string      `json:"channel"`
+	Candles []CandleRaw `json:"candles"`
+	Error   json.RawMessage
 }
 
 func (w *WS) handle(data []byte) {

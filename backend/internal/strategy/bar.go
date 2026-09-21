@@ -1,6 +1,6 @@
 package strategy
 
-// Bar is a closed 1h candle. Time is Unix seconds of the bar open.
+// Bar is a closed candle of the configured timeframe. Time is Unix seconds of the bar open.
 type Bar struct {
 	Time   int64
 	Open   float64
@@ -57,12 +57,14 @@ type Config struct {
 }
 
 type LS5Config struct {
-	Enabled    bool
-	StreakN    int
-	PauseBars  int
-	ResumeATR  float64
+	Enabled   bool
+	StreakN   int
+	PauseBars int
+	ResumeATR float64
 }
 
+// DefaultConfig is the research 1h fixture used by parity tests.
+// Live values come from DONCHIAN_* env (see config.applyStrategyEnv).
 func DefaultConfig() Config {
 	return Config{
 		ChannelN:    30,
