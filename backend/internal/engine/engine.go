@@ -51,6 +51,9 @@ type Engine struct {
 	fundingBasis map[string]float64
 	fundingLast  map[string]float64
 
+	// Serializes Lighter sendTx (nonce/sign). HandleClosed may run per-symbol in parallel.
+	txMu sync.Mutex
+
 	alertMu sync.Mutex
 	alertAt map[string]time.Time
 }
@@ -257,7 +260,9 @@ func (e *Engine) OnLiveCandle(marketID uint16, closed *strategy.Bar, live strate
 	}
 	e.mu.Unlock()
 	if closed != nil {
-		e.HandleClosed(context.Background(), sym, *closed, live.Open)
+		// Don't block the WS read loop on entry/WaitFill — BTC must not stall ETH.
+		bar, open := *closed, live.Open
+		go e.HandleClosed(context.Background(), sym, bar, open)
 	}
 }
 
@@ -283,9 +288,14 @@ func (e *Engine) HandleClosed(ctx context.Context, symbol string, bar strategy.B
 	if nextOpen <= 0 {
 		nextOpen = bar.Close
 	}
-	if err := e.Store.UpsertCandles(ctx, symbol, []strategy.Bar{bar}); err != nil {
-		e.alert(ctx, "error", "db", "candle persist: "+err.Error())
+	tf := e.Cfg.Timeframe
+	if tf <= 0 {
+		tf = time.Hour
 	}
+	barCloseWall := time.Unix(bar.Time, 0).UTC().Add(tf)
+	detectLagMs := time.Since(barCloseWall).Milliseconds()
+
+	// Hot path: update memory + decide + live order before SQLite shadows/persist.
 	e.mu.Lock()
 	bars := append(e.bars[symbol], bar)
 	sort.Slice(bars, func(i, j int) bool { return bars[i].Time < bars[j].Time })
@@ -299,14 +309,7 @@ func (e *Engine) HandleClosed(ctx context.Context, symbol string, bar strategy.B
 
 	i := len(bars) - 1
 	atr := strategy.ATR(bars, e.liveCfg.ATRPeriod)
-	nextTime := bar.Time + int64(e.Cfg.Timeframe.Seconds())
-
-	if e.Cfg.ShadowLS5 {
-		e.stepBook(ctx, symbol, telemetry.BookLS5, bars, atr, i, nextOpen, nextTime, &ls5, e.ls5Cfg)
-	}
-	if e.Cfg.ShadowBaseline {
-		e.stepBook(ctx, symbol, telemetry.BookBaseline, bars, atr, i, nextOpen, nextTime, &base, e.baseCfg)
-	}
+	nextTime := bar.Time + int64(tf.Seconds())
 
 	act := strategy.Decide(bars, atr, i, nextOpen, nextTime, st, e.liveCfg)
 	switch act.Kind {
@@ -319,9 +322,19 @@ func (e *Engine) HandleClosed(ctx context.Context, symbol string, bar strategy.B
 	case strategy.ActionEnter:
 		if e.skipNewEntries() {
 			e.alert(ctx, "warn", "verdict", symbol+" skip entry: verdict STOP (shadow continues)")
-		} else if err := e.executeEntry(ctx, symbol, &st, bars, act); err != nil {
+		} else if err := e.executeEntry(ctx, symbol, &st, bars, act, barCloseWall, detectLagMs); err != nil {
 			e.alert(ctx, "error", "entry", symbol+" entry failed: "+err.Error())
 		}
+	}
+
+	if err := e.Store.UpsertCandles(ctx, symbol, []strategy.Bar{bar}); err != nil {
+		e.alert(ctx, "error", "db", "candle persist: "+err.Error())
+	}
+	if e.Cfg.ShadowLS5 {
+		e.stepBook(ctx, symbol, telemetry.BookLS5, bars, atr, i, nextOpen, nextTime, &ls5, e.ls5Cfg)
+	}
+	if e.Cfg.ShadowBaseline {
+		e.stepBook(ctx, symbol, telemetry.BookBaseline, bars, atr, i, nextOpen, nextTime, &base, e.baseCfg)
 	}
 	e.writeBarLog(ctx, symbol, bars, atr, i, st, ls5, base)
 	e.persistSymbol(ctx, symbol, st, bars)
@@ -388,7 +401,7 @@ func (e *Engine) persistSymbol(ctx context.Context, symbol string, st strategy.S
 	_ = e.Store.SaveSymbolState(ctx, symbol, sst)
 }
 
-func (e *Engine) executeEntry(ctx context.Context, symbol string, st *strategy.State, bars []strategy.Bar, act strategy.Action) error {
+func (e *Engine) executeEntry(ctx context.Context, symbol string, st *strategy.State, bars []strategy.Bar, act strategy.Action, barCloseWall time.Time, detectLagMs int64) error {
 	if ok, why := e.Risk.AllowEntry(0, st.Equity); !ok {
 		e.alert(ctx, "warn", "risk", symbol+" skip entry: "+why)
 		return nil
@@ -432,26 +445,39 @@ func (e *Engine) executeEntry(ctx context.Context, symbol string, st *strategy.S
 	if e.Signer == nil {
 		return fmt.Errorf("signer is not configured")
 	}
+
+	sendAt := time.Now()
+	lagMs := sendAt.Sub(barCloseWall).Milliseconds()
+	e.txMu.Lock()
 	res, err := e.Signer.MarketIOC(symbol, buy, qty, act.Price, e.Cfg.MarketSlippage, clientIdx, false)
+	e.txMu.Unlock()
 	if err != nil {
 		_ = e.Store.CloseTrade(ctx, id, time.Now().Unix(), act.Price, "rejected", 0, 0, 0, 0, 0, st.ConsecLosses, int64(st.PauseUntilIdx))
 		return err
 	}
 	_ = e.Store.InsertOrder(ctx, symbol, clientIdx, "entry", "sent", false, act.Price, 0, qty, res.TxHash)
 	e.setOrderIdx(symbol, clientIdx, 0)
-	e.recordEntryFill(ctx, symbol, id, clientIdx, res.TxHash, act.Price)
+	e.seedFundingBasis(symbol)
+
+	// Place protective SL before fill polling — WaitFill must not delay the stop.
 	slIdx, err := e.Store.NextClientOrderIndex(ctx)
 	if err != nil {
 		return err
 	}
-	if _, err := e.Signer.StopLoss(symbol, buy, qty, act.Stop, e.Cfg.MarketSlippage, slIdx); err != nil {
-		e.alert(ctx, "error", "stop", symbol+" failed to place SL after entry: "+err.Error()+" — flattening")
-		if _, err2 := e.Signer.MarketIOC(symbol, !buy, qty, act.Price, e.Cfg.MarketSlippage, slIdx+1, true); err2 != nil {
-			return fmt.Errorf("entry ok but SL failed (%v) and flatten failed (%v)", err, err2)
+	e.txMu.Lock()
+	_, slErr := e.Signer.StopLoss(symbol, buy, qty, act.Stop, e.Cfg.MarketSlippage, slIdx)
+	e.txMu.Unlock()
+	if slErr != nil {
+		e.alert(ctx, "error", "stop", symbol+" failed to place SL after entry: "+slErr.Error()+" — flattening")
+		e.txMu.Lock()
+		_, err2 := e.Signer.MarketIOC(symbol, !buy, qty, act.Price, e.Cfg.MarketSlippage, slIdx+1, true)
+		e.txMu.Unlock()
+		if err2 != nil {
+			return fmt.Errorf("entry ok but SL failed (%v) and flatten failed (%v)", slErr, err2)
 		}
 		_ = e.Store.CloseTrade(ctx, id, time.Now().Unix(), act.Price, string(strategy.OutcomeWatch), 0, 0, 0, 0, 0, st.ConsecLosses, int64(st.PauseUntilIdx))
 		e.clearOrderIdx(symbol)
-		return err
+		return slErr
 	}
 	_ = e.Store.InsertOrder(ctx, symbol, slIdx, "stop", "open", true, 0, act.Stop, qty, "")
 	e.setOrderIdx(symbol, clientIdx, slIdx)
@@ -460,7 +486,20 @@ func (e *Engine) executeEntry(ctx context.Context, symbol string, st *strategy.S
 		st.Position.ID = int(id)
 		st.Position.Quantity = qty
 	}
-	e.alert(ctx, "info", "entry", fmt.Sprintf("%s %s qty=%.6f px=%.2f stop=%.2f hash=%s", symbol, act.Direction, qty, act.Price, act.Stop, res.TxHash))
+
+	e.Log.Info("entry lag",
+		"symbol", symbol,
+		"detect_lag_ms", detectLagMs,
+		"lag_ms", lagMs,
+		"bar_close_wall", barCloseWall.UTC().Format(time.RFC3339),
+		"send_at", sendAt.UTC().Format(time.RFC3339Nano),
+		"hash", res.TxHash,
+	)
+	e.alert(ctx, "info", "entry", fmt.Sprintf("%s %s qty=%.6f px=%.2f stop=%.2f lag_ms=%d detect_lag_ms=%d hash=%s",
+		symbol, act.Direction, qty, act.Price, act.Stop, lagMs, detectLagMs, res.TxHash))
+
+	txHash := res.TxHash
+	go e.recordEntryFill(context.Background(), symbol, id, clientIdx, txHash, act.Price)
 	return nil
 }
 
@@ -484,7 +523,9 @@ func (e *Engine) executeExit(ctx context.Context, symbol string, st *strategy.St
 	if err != nil {
 		return err
 	}
+	e.txMu.Lock()
 	res, err := e.Signer.MarketIOC(symbol, !buy, qty, act.Price, e.Cfg.MarketSlippage, clientIdx, true)
+	e.txMu.Unlock()
 	if err != nil {
 		return err
 	}
@@ -535,9 +576,12 @@ func (e *Engine) cancelStops(ctx context.Context, symbol string) {
 	}
 	for _, o := range orders {
 		if o.ReduceOnly || o.Trigger > 0 {
-			if _, err := e.Signer.Cancel(symbol, o.OrderIndex); err != nil && o.ClientOrderIndex > 0 {
+			e.txMu.Lock()
+			_, err := e.Signer.Cancel(symbol, o.OrderIndex)
+			if err != nil && o.ClientOrderIndex > 0 {
 				_, _ = e.Signer.Cancel(symbol, o.ClientOrderIndex)
 			}
+			e.txMu.Unlock()
 		}
 	}
 }
@@ -681,7 +725,10 @@ func (e *Engine) flatten(ctx context.Context, symbol string, ex lighter.Position
 		e.alert(ctx, "error", "flatten", err.Error())
 		return
 	}
-	if _, err := e.Signer.MarketIOC(symbol, buy, ex.Size, px, e.Cfg.MarketSlippage, idx, true); err != nil {
+	e.txMu.Lock()
+	_, err = e.Signer.MarketIOC(symbol, buy, ex.Size, px, e.Cfg.MarketSlippage, idx, true)
+	e.txMu.Unlock()
+	if err != nil {
 		e.alert(ctx, "error", "flatten", symbol+" "+err.Error())
 		return
 	}

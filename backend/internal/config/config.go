@@ -71,7 +71,7 @@ func Load() (*Config, error) {
 		Network:           net,
 		APIPrivateKey:     strings.TrimSpace(os.Getenv("LIGHTER_API_PRIVATE_KEY")),
 		AccountIndex:      int64(getenvInt("LIGHTER_ACCOUNT_INDEX", 0)),
-		APIKeyIndex:       uint8(getenvInt("LIGHTER_API_KEY_INDEX", 2)),
+		APIKeyIndex:       uint8(getenvInt("LIGHTER_API_KEY_INDEX", 4)),
 		L1Address:         strings.TrimSpace(os.Getenv("LIGHTER_L1_ADDRESS")),
 		Symbols:           splitCSV(getenv("SYMBOLS", "BTC,ETH")),
 		ShadowBaseline:    getenvBool("SHADOW_BASELINE", true),
@@ -111,8 +111,8 @@ func Load() (*Config, error) {
 	default:
 		return nil, fmt.Errorf("unknown LIGHTER_NETWORK %q (use testnet or mainnet)", net)
 	}
-	if cfg.APIKeyIndex < 2 {
-		return nil, fmt.Errorf("LIGHTER_API_KEY_INDEX must be 2-254 (0-1 are reserved for the Lighter UI)")
+	if cfg.APIKeyIndex < 4 {
+		return nil, fmt.Errorf("LIGHTER_API_KEY_INDEX must be 4-254 (0-3 are reserved for the Lighter UI/app)")
 	}
 	if len(cfg.Symbols) == 0 {
 		return nil, fmt.Errorf("SYMBOLS is empty")

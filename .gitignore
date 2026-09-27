@@ -1,6 +1,7 @@
 # secrets & runtime
 .env
 testnet.txt
+mainnet.txt
 data/
 *.db
 *.db-wal

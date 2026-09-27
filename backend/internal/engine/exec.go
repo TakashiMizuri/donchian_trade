@@ -127,7 +127,7 @@ func (e *Engine) recordEntryFill(ctx context.Context, symbol string, tradeID, cl
 			e.markFunding(acc)
 		}
 	}
-	e.seedFundingBasis(symbol)
+	// funding basis was frozen at send time in executeEntry; do not re-seed here
 	return livePx
 }
 

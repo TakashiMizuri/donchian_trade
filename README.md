@@ -71,7 +71,7 @@ Colocation Lighter рекомендует AWS Tokyo `ap-northeast-1a`. Для 1h
 ## 3. Lighter: ключи и account index
 
 1. Создайте кошелёк / зайдите в Lighter UI.
-2. **API keys:** индексы **0 и 1 зарезервированы под веб/мобильное приложение**. Для бота создайте ключ с индексом **2–254**.
+2. **API keys:** индексы **0–3 зарезервированы** под веб/мобильное приложение. Для бота создайте ключ с индексом **4–254**.
 3. Сохраните **private key** API key (hex). Это секрет, как seed.
 4. Узнайте **account index** (целое число аккаунта, не путать с api_key_index). В UI или через API:
 
@@ -126,7 +126,7 @@ nano .env
 | `LIGHTER_NETWORK` | `testnet` или `mainnet` | `testnet` |
 | `LIGHTER_API_PRIVATE_KEY` | hex private key API | `0xabc...` |
 | `LIGHTER_ACCOUNT_INDEX` | индекс аккаунта | `12345` |
-| `LIGHTER_API_KEY_INDEX` | 2–254 | `2` |
+| `LIGHTER_API_KEY_INDEX` | 4–254 | `4` |
 | `SYMBOLS` | инструменты | `BTC,ETH` |
 | `DONCHIAN_TIMEFRAME` | свеча Lighter: `1h` `30m` `15m` `5m` | `30m` |
 | `DONCHIAN_CHANNEL_N` | баров входа | `60` |
@@ -249,29 +249,77 @@ Caddy сам получит Let's Encrypt. 80 и 443 тогда у Caddy, даш
 
 ---
 
-## 7. Первый прогон: testnet, затем mainnet
+## 7. Переход на mainnet (реальные деньги)
 
-1. `LIGHTER_NETWORK=testnet`, ключи **testnet**, депозит testnet.
-2. Дождитесь закрытия часа — либо смотрите shadow/live в дашборде и Telegram.
-3. Убедитесь: после входа на бирже висит **один** reduce-only stop.
-4. Проверьте `/kill` в Telegram на testnet (flatten).
-5. `/resume`, когда готовы снова входить.
+Testnet и mainnet — **разные** аккаунты, ключи, `account_index` и SQLite. Не переключайте сеть на живой `bot.db`.
 
-Переключение на mainnet:
+### 7.1 Пул ≠ маржа
+
+Деньги в Public Pool / LLP **не** являются collateral для перпов. Их нужно **вывести на свой Lighter perp-счёт** (Available / Equity в UI).
+
+- Делайте Withdraw **внутри Lighter**, на тот же аккаунт, с которого будет торговать бот.
+- **Не** выводите на Ethereum L1 «чтобы потом закинуть обратно»: это газ, мост и лишние сутки.
+- Готово, когда в UI на **mainnet** (`https://app.lighter.xyz`) в Perps видно Available ≈ ваши $200, а в пуле 0 (или сколько оставили).
+- Минимум депозита на перпы — 1 USDC; для бота нужно, чтобы **весь** рабочий депозит был Available, не в shares.
+
+### 7.2 Ключи mainnet
+
+Индексы **0–3** — только UI. Для бота создайте ключ **4–254** уже в mainnet, не копируйте testnet-ключ.
+
+```bash
+curl "https://mainnet.zklighter.elliot.ai/api/v1/accountsByL1Address?l1_address=0xВАШ_АДРЕС"
+```
+
+Запомните `account_index` (не путать с `api_key_index`).
+
+### 7.3 Сброс testnet-журнала на VPS
 
 ```bash
 cd /opt/donchian
-# 1) бэкап БД (testnet журнал лучше не смешивать с mainnet)
-docker compose stop bot
+docker compose stop
+mkdir -p backups
 cp -a data "backups/data-testnet-$(date -u +%Y%m%dT%H%M%SZ)"
-rm -f data/bot.db data/bot.db-wal data/bot.db-shm
-# 2) ключи и сеть mainnet в .env
-nano .env   # LIGHTER_NETWORK=mainnet, новые ключи/account_index, COOKIE_SECURE если HTTPS
-docker compose up -d
+rm -f data/bot.db data/bot.db-wal data/bot.db-shm data/equity_snapshots.csv
+rm -rf data/reports
+docker compose rm -f bot
+# логи контейнера уйдут вместе с rm; после up — новая пустая SQLite
+```
+
+Локальные дампы (`30m_first_day/`, `bot-snap.db`) не трогайте — это архив, не прод.
+
+### 7.4 `.env` на mainnet
+
+Обязательно сменить (остальные `DONCHIAN_*` оставить как 30m N60):
+
+```dotenv
+LIGHTER_NETWORK=mainnet
+LIGHTER_API_PRIVATE_KEY=0x...          # новый ключ mainnet
+LIGHTER_ACCOUNT_INDEX=...              # из curl выше, не testnet 214
+LIGHTER_API_KEY_INDEX=4
+LIGHTER_L1_ADDRESS=0x...
+DRY_RUN=false
+KILL_SWITCH=false
+DAILY_LOSS_LIMIT_USD=40
+CASH_FLOW_MIN_USD=1
+```
+
+`DAILY_LOSS_LIMIT_USD=40` — операционный стоп на маленьком депозите (research DD-pause это не заменяет). Cap $1000 при $200 не биндится.
+
+### 7.5 Старт и проверка
+
+```bash
+cd /opt/donchian
+git pull
+docker compose up -d --build
 docker compose logs -f bot
 ```
 
-Не используйте testnet SQLite на mainnet — состояние streak/позиции будет врать.
+В логе должно быть: `network=mainnet`, `strategy profile … tf=30m n=60`, `market symbol=ETH id=0`, `market symbol=BTC id=1` (не 4095/4096), `bootstrapped`, seed ≈ $200. Telegram: «Касса seed +~200». Дашборд: сеть **mainnet**.
+
+Первый бар может не дать сделки — это норма. `/status` → Live = тень = депозит, позиции FLAT, WAIT.
+
+Если бот пишет `sqlite is frozen as …` или `already has candles` — база не пустая, вернитесь к §7.3.
+
 
 ---
 
@@ -364,7 +412,7 @@ Telegram `/status` — то же с телефона без браузера.
 | Снять kill | `/resume` или кнопка на дашборде |
 | Место на диске | `df -h`, `docker system df`, бэкапы в `backups/` |
 | Смена пароля дашборда | поменять `DASHBOARD_PASSWORD` в `.env`, `docker compose up -d bot` |
-| Смена API-ключа | новый ключ в `.env`, индекс 2–254, рестарт; nonce начнётся заново |
+| Смена API-ключа | новый ключ в `.env`, индекс 4–254, рестарт; nonce начнётся заново |
 
 После рестарта бот:
 
@@ -413,7 +461,7 @@ npm run dev
 | Симптом | Что проверить |
 |---------|----------------|
 | `LIGHTER_API_PRIVATE_KEY is required` | ключ в `.env`, compose подхватил `env_file` |
-| `API_KEY_INDEX must be 2-254` | не 0/1 |
+| `API_KEY_INDEX must be 4-254` | не 0–3 (заняты приложением Lighter) |
 | `market BTC not found` | сеть testnet/mainnet, символ как на Lighter (`BTC` / `ETH`) |
 | `sendTx code=… nonce` | другой процесс с тем же api_key_index; один бот на ключ |
 | Нет стопа после входа | алерт `watchdog` / `stop`; бот flatten; смотрите active orders в UI |
