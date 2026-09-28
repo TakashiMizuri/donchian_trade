@@ -10,6 +10,7 @@ import (
 
 	"donchian.trade/bot/internal/config"
 	"donchian.trade/bot/internal/exchange/lighter"
+	"donchian.trade/bot/internal/flog"
 	"donchian.trade/bot/internal/notify"
 	"donchian.trade/bot/internal/risk"
 	"donchian.trade/bot/internal/store"
@@ -28,6 +29,7 @@ type Engine struct {
 	Notify  notify.Notifier
 	Risk    *risk.Guard
 	Log     *slog.Logger
+	Flog    *flog.Logger
 
 	mu          sync.Mutex
 	bars        map[string][]strategy.Bar
@@ -41,7 +43,6 @@ type Engine struct {
 	wsErr       string
 	started     time.Time
 	liveCfg     strategy.Config
-	ls5Cfg      strategy.Config
 	baseCfg     strategy.Config
 	lastVerdict string
 
@@ -60,7 +61,6 @@ type Engine struct {
 
 func New(cfg *config.Config, st *store.Store, httpc *lighter.HTTPClient, signer *lighter.Signer, markets map[string]lighter.MarketMeta, ntf notify.Notifier, rg *risk.Guard, log *slog.Logger) *Engine {
 	live := cfg.LiveConfig()
-	ls5 := cfg.ShadowLS5Config()
 	base := cfg.BaselineConfig()
 	idBy := map[string]uint16{}
 	symBy := map[uint16]string{}
@@ -83,7 +83,7 @@ func New(cfg *config.Config, st *store.Store, httpc *lighter.HTTPClient, signer 
 		entryIdx: map[string]int64{}, slIdx: map[string]int64{},
 		fundingBasis: map[string]float64{}, fundingLast: map[string]float64{},
 		alertAt: map[string]time.Time{},
-		started: time.Now(), liveCfg: live, ls5Cfg: ls5, baseCfg: base,
+		started: time.Now(), liveCfg: live, baseCfg: base,
 	}
 }
 
@@ -111,6 +111,9 @@ func (e *Engine) alert(ctx context.Context, level, kind, msg string) {
 	}
 	_ = e.Store.InsertEvent(ctx, level, kind, msg, nil)
 	e.Notify.Alert(ctx, level, kind, msg)
+	if e.Flog != nil && (level == "error" || level == "warn") {
+		e.Flog.Event(level, map[string]any{"kind": kind, "message": msg})
+	}
 	g, _ := e.Store.LoadGlobal(ctx)
 	if level == "error" || level == "warn" {
 		g.LastError = msg
@@ -130,6 +133,13 @@ func (e *Engine) SetWS(ok bool, err string) {
 		g.LastError = err
 	}
 	_ = e.Store.SaveGlobal(ctx, g)
+	if e.Flog != nil {
+		ev := map[string]any{"connected": ok}
+		if err != "" {
+			ev["error"] = err
+		}
+		e.Flog.Event("ws", ev)
+	}
 	if !ok && err != "" {
 		e.alert(ctx, "warn", "ws", "Lighter WS disconnected: "+err)
 	}
@@ -182,8 +192,6 @@ func (e *Engine) Bootstrap(ctx context.Context) error {
 			return err
 		}
 		live := strategy.NewState(e.cashBase())
-		live.ConsecLosses = sst.ConsecLosses
-		live.PauseUntilIdx = sst.PauseUntilIdx
 		if open, err := e.Store.OpenLiveTrade(ctx, sym); err == nil && open != nil {
 			live.Position = &strategy.Position{
 				ID:           int(open.ID),
@@ -223,6 +231,29 @@ func (e *Engine) Bootstrap(ctx context.Context) error {
 	e.snapshotBooks(ctx, "boot")
 	e.maybeMissedDaily(ctx)
 	_ = e.Store.PruneBarLogs(ctx, time.Now().Add(-120*24*time.Hour).Unix())
+	if e.Flog != nil {
+		mids := make([]uint16, 0, len(e.Cfg.Symbols))
+		for _, sym := range e.Cfg.Symbols {
+			mids = append(mids, e.IDBySym[sym])
+		}
+		tf := e.Cfg.Timeframe
+		if tf <= 0 {
+			tf = time.Hour
+		}
+		e.Flog.Event("boot", map[string]any{
+			"fingerprint":  e.Cfg.Fingerprint(),
+			"tag":          e.Cfg.Tag,
+			"tf":           e.Cfg.Resolution,
+			"tf_sec":       int(tf.Seconds()),
+			"brk_atr":      e.Cfg.MinBreakoutATR,
+			"vol_rank_max": e.Cfg.MaxVolRank,
+			"symbols":      e.Cfg.Symbols,
+			"market_ids":   mids,
+			"seed_equity":  e.cashBase(),
+			"shadow_twin":  e.Cfg.ShadowBrkVol,
+			"shadow_base":  e.Cfg.ShadowBaseline,
+		})
+	}
 	return nil
 }
 
@@ -330,8 +361,9 @@ func (e *Engine) HandleClosed(ctx context.Context, symbol string, bar strategy.B
 	if err := e.Store.UpsertCandles(ctx, symbol, []strategy.Bar{bar}); err != nil {
 		e.alert(ctx, "error", "db", "candle persist: "+err.Error())
 	}
-	if e.Cfg.ShadowLS5 {
-		e.stepBook(ctx, symbol, telemetry.BookLS5, bars, atr, i, nextOpen, nextTime, &ls5, e.ls5Cfg)
+	if e.Cfg.ShadowBrkVol {
+		// Twin of live filters (brk/vol). Reuses shadow_ls5 book for §17 match.
+		e.stepBook(ctx, symbol, telemetry.BookLS5, bars, atr, i, nextOpen, nextTime, &ls5, e.liveCfg)
 	}
 	if e.Cfg.ShadowBaseline {
 		e.stepBook(ctx, symbol, telemetry.BookBaseline, bars, atr, i, nextOpen, nextTime, &base, e.baseCfg)
@@ -376,9 +408,7 @@ func uniqueBars(bars []strategy.Bar) []strategy.Bar {
 
 func (e *Engine) persistSymbol(ctx context.Context, symbol string, st strategy.State, bars []strategy.Bar) {
 	sst := store.SymbolState{
-		ConsecLosses:  st.ConsecLosses,
-		PauseUntilIdx: st.PauseUntilIdx,
-		BarsSeen:      len(bars),
+		BarsSeen: len(bars),
 	}
 	if len(bars) > 0 {
 		sst.LastBarTime = bars[len(bars)-1].Time
@@ -386,12 +416,6 @@ func (e *Engine) persistSymbol(ctx context.Context, symbol string, st strategy.S
 	if st.Position != nil {
 		sst.LastSignalTime = st.Position.SignalTime
 		sst.OpenTradeID = int64(st.Position.ID)
-	}
-	if st.PauseUntilIdx >= 0 && st.PauseUntilIdx < len(bars) {
-		sst.PauseUntilTime = bars[st.PauseUntilIdx].Time
-	} else if st.PauseUntilIdx >= len(bars) && len(bars) > 0 {
-		extra := st.PauseUntilIdx - (len(bars) - 1)
-		sst.PauseUntilTime = bars[len(bars)-1].Time + int64(extra)*3600
 	}
 	entry, sl, basis, last := e.snapshotIdx(symbol)
 	sst.EntryClientIdx = entry
@@ -448,14 +472,27 @@ func (e *Engine) executeEntry(ctx context.Context, symbol string, st *strategy.S
 
 	sendAt := time.Now()
 	lagMs := sendAt.Sub(barCloseWall).Milliseconds()
+	if e.Flog != nil {
+		e.Flog.Event("entry_intent", map[string]any{
+			"symbol": symbol, "direction": act.Direction,
+			"qty": qty, "stop": act.Stop, "risk": act.Risk, "ref_px": act.Price,
+			"detect_lag_ms": detectLagMs,
+		})
+	}
 	e.txMu.Lock()
 	res, err := e.Signer.MarketIOC(symbol, buy, qty, act.Price, e.Cfg.MarketSlippage, clientIdx, false)
 	e.txMu.Unlock()
 	if err != nil {
-		_ = e.Store.CloseTrade(ctx, id, time.Now().Unix(), act.Price, "rejected", 0, 0, 0, 0, 0, st.ConsecLosses, int64(st.PauseUntilIdx))
+		_ = e.Store.CloseTrade(ctx, id, time.Now().Unix(), act.Price, "rejected", 0, 0, 0, 0, 0, 0, 0)
 		return err
 	}
 	_ = e.Store.InsertOrder(ctx, symbol, clientIdx, "entry", "sent", false, act.Price, 0, qty, res.TxHash)
+	if e.Flog != nil {
+		e.Flog.Event("entry_sent", map[string]any{
+			"symbol": symbol, "direction": act.Direction, "client_idx": clientIdx,
+			"lag_ms": lagMs, "tx_hash": res.TxHash,
+		})
+	}
 	e.setOrderIdx(symbol, clientIdx, 0)
 	e.seedFundingBasis(symbol)
 
@@ -468,6 +505,9 @@ func (e *Engine) executeEntry(ctx context.Context, symbol string, st *strategy.S
 	_, slErr := e.Signer.StopLoss(symbol, buy, qty, act.Stop, e.Cfg.MarketSlippage, slIdx)
 	e.txMu.Unlock()
 	if slErr != nil {
+		if e.Flog != nil {
+			e.Flog.Event("sl_failed", map[string]any{"symbol": symbol, "stop": act.Stop, "err": slErr.Error()})
+		}
 		e.alert(ctx, "error", "stop", symbol+" failed to place SL after entry: "+slErr.Error()+" — flattening")
 		e.txMu.Lock()
 		_, err2 := e.Signer.MarketIOC(symbol, !buy, qty, act.Price, e.Cfg.MarketSlippage, slIdx+1, true)
@@ -475,9 +515,12 @@ func (e *Engine) executeEntry(ctx context.Context, symbol string, st *strategy.S
 		if err2 != nil {
 			return fmt.Errorf("entry ok but SL failed (%v) and flatten failed (%v)", slErr, err2)
 		}
-		_ = e.Store.CloseTrade(ctx, id, time.Now().Unix(), act.Price, string(strategy.OutcomeWatch), 0, 0, 0, 0, 0, st.ConsecLosses, int64(st.PauseUntilIdx))
+		_ = e.Store.CloseTrade(ctx, id, time.Now().Unix(), act.Price, string(strategy.OutcomeWatch), 0, 0, 0, 0, 0, 0, 0)
 		e.clearOrderIdx(symbol)
 		return slErr
+	}
+	if e.Flog != nil {
+		e.Flog.Event("sl_placed", map[string]any{"symbol": symbol, "stop": act.Stop, "client_idx": slIdx})
 	}
 	_ = e.Store.InsertOrder(ctx, symbol, slIdx, "stop", "open", true, 0, act.Stop, qty, "")
 	e.setOrderIdx(symbol, clientIdx, slIdx)
@@ -499,7 +542,7 @@ func (e *Engine) executeEntry(ctx context.Context, symbol string, st *strategy.S
 		symbol, act.Direction, qty, act.Price, act.Stop, lagMs, detectLagMs, res.TxHash))
 
 	txHash := res.TxHash
-	go e.recordEntryFill(context.Background(), symbol, id, clientIdx, txHash, act.Price)
+	go e.recordEntryFill(context.Background(), symbol, id, clientIdx, txHash, act.Price, act.Direction)
 	return nil
 }
 
@@ -512,12 +555,18 @@ func (e *Engine) executeExit(ctx context.Context, symbol string, st *strategy.St
 	qty := pos.Quantity
 	if e.Cfg.DryRun {
 		t := strategy.Apply(st, e.liveCfg, bars, act)
-		e.finishClose(ctx, int64(pos.ID), st, t, act)
+		e.finishClose(ctx, symbol, int64(pos.ID), st, t, act)
 		e.alert(ctx, "info", "exit", fmt.Sprintf("[dry-run] %s %s %s px=%.2f", symbol, act.Kind, pos.Direction, act.Price))
 		return nil
 	}
 	if e.Signer == nil {
 		return fmt.Errorf("signer is not configured")
+	}
+	if e.Flog != nil {
+		e.Flog.Event("exit_intent", map[string]any{
+			"symbol": symbol, "kind": act.Kind, "direction": pos.Direction,
+			"qty": qty, "ref_px": act.Price,
+		})
 	}
 	clientIdx, err := e.Store.NextClientOrderIndex(ctx)
 	if err != nil {
@@ -548,7 +597,7 @@ func (e *Engine) noteStopHit(ctx context.Context, symbol string, st *strategy.St
 	pos := *st.Position
 	t := strategy.Apply(st, e.liveCfg, bars, act)
 	if e.Cfg.DryRun {
-		e.finishClose(ctx, int64(pos.ID), st, t, act)
+		e.finishClose(ctx, symbol, int64(pos.ID), st, t, act)
 	} else {
 		e.finishCloseLive(ctx, symbol, int64(pos.ID), st, t, e.slClientIdx(symbol), "")
 		e.clearOrderIdx(symbol)
@@ -556,12 +605,18 @@ func (e *Engine) noteStopHit(ctx context.Context, symbol string, st *strategy.St
 	e.alert(ctx, "info", "sl", fmt.Sprintf("%s ATR stop hit at %.2f", symbol, act.Price))
 }
 
-func (e *Engine) finishClose(ctx context.Context, id int64, st *strategy.State, t *strategy.Trade, act strategy.Action) {
+func (e *Engine) finishClose(ctx context.Context, symbol string, id int64, st *strategy.State, t *strategy.Trade, act strategy.Action) {
 	if t == nil {
 		return
 	}
-	_ = e.Store.CloseTrade(ctx, id, t.ExitTime, t.ExitPrice, string(t.Outcome), t.Gross, t.EntryFee, t.ExitFee, 0, t.Net, st.ConsecLosses, int64(st.PauseUntilIdx))
+	_ = e.Store.CloseTrade(ctx, id, t.ExitTime, t.ExitPrice, string(t.Outcome), t.Gross, t.EntryFee, t.ExitFee, 0, t.Net, 0, 0)
 	e.Risk.AddRealized(t.Net)
+	if e.Flog != nil {
+		e.Flog.Event("exit", map[string]any{
+			"symbol": symbol, "outcome": t.Outcome, "exit_px": t.ExitPrice,
+			"entry_px": t.EntryPrice, "net": t.Net, "kind": act.Kind, "dry_run": true,
+		})
+	}
 }
 
 func (e *Engine) cancelStops(ctx context.Context, symbol string) {
@@ -626,7 +681,11 @@ func (e *Engine) Reconcile(ctx context.Context) {
 			}
 			st.Position = nil
 		case !local && hasEx:
-			e.alert(ctx, "error", "reconcile", fmt.Sprintf("%s unexpected exchange position size=%.6f — flattening", sym, ex.Size))
+			msg := fmt.Sprintf("%s unexpected exchange position size=%.6f — flattening", sym, ex.Size)
+			if e.Flog != nil {
+				e.Flog.Event("reconcile", map[string]any{"symbol": sym, "issue": "unexpected_position", "size": ex.Size})
+			}
+			e.alert(ctx, "error", "reconcile", msg)
 			e.mu.Unlock()
 			e.flatten(ctx, sym, ex)
 			e.mu.Lock()
@@ -637,6 +696,9 @@ func (e *Engine) Reconcile(ctx context.Context) {
 				wantSign = -1
 			}
 			if ex.Sign != 0 && ex.Sign != wantSign {
+				if e.Flog != nil {
+					e.Flog.Event("reconcile", map[string]any{"symbol": sym, "issue": "side_mismatch"})
+				}
 				e.alert(ctx, "error", "reconcile", sym+" side mismatch — flattening")
 				e.mu.Unlock()
 				e.flatten(ctx, sym, ex)
@@ -657,17 +719,18 @@ func (e *Engine) Reconcile(ctx context.Context) {
 		act := strategy.Action{Kind: strategy.ActionExitStop, Price: p.stop, FillTime: time.Now().Unix(), FillIdx: len(p.bars) - 1}
 		t := strategy.Apply(&p.st, e.liveCfg, p.bars, act)
 		if e.Cfg.DryRun {
-			e.finishClose(ctx, p.id, &p.st, t, act)
+			e.finishClose(ctx, p.sym, p.id, &p.st, t, act)
 		} else {
 			e.finishCloseLive(ctx, p.sym, p.id, &p.st, t, e.slClientIdx(p.sym), "")
 			e.clearOrderIdx(p.sym)
 		}
 		e.alert(ctx, "info", "reconcile", p.sym+" exchange flat — closed local as SL/fill")
+		if e.Flog != nil {
+			e.Flog.Event("reconcile", map[string]any{"symbol": p.sym, "issue": "exchange_flat_closed_local"})
+		}
 		e.mu.Lock()
 		st := e.liveST[p.sym]
 		st.Position = nil
-		st.ConsecLosses = p.st.ConsecLosses
-		st.PauseUntilIdx = p.st.PauseUntilIdx
 		e.liveST[p.sym] = st
 		e.persistSymbol(ctx, p.sym, st, e.bars[p.sym])
 		e.mu.Unlock()
@@ -831,6 +894,7 @@ type Snapshot struct {
 	DailyPnL             float64          `json:"daily_pnl"`
 	Equity               float64          `json:"equity"`
 	EquityShadowLS5      float64          `json:"equity_shadow_ls5"`
+	EquityShadowTwin     float64          `json:"equity_shadow_twin"`
 	EquityShadowBaseline float64          `json:"equity_shadow_baseline"`
 	EquityLiveExFunding  float64          `json:"equity_live_ex_funding"`
 	GapUSD               float64          `json:"gap_usd"`
@@ -871,6 +935,7 @@ type SymbolSnap struct {
 	PauseUntilTime  int64   `json:"pause_until_time"`
 	Paused          bool    `json:"paused"`
 	ShadowLS5       string  `json:"shadow_ls5"`
+	ShadowTwin      string  `json:"shadow_twin"`
 	ShadowBaseline  string  `json:"shadow_baseline"`
 	ShadowConsecLS5 int     `json:"shadow_consec_ls5"`
 }
@@ -898,6 +963,7 @@ func (e *Engine) Snapshot(ctx context.Context) Snapshot {
 		DailyPnL:             daily,
 		Equity:               eq,
 		EquityShadowLS5:      rep.EquityShadowLS5,
+		EquityShadowTwin:     rep.EquityShadowLS5,
 		EquityShadowBaseline: rep.EquityShadowBaseline,
 		EquityLiveExFunding:  rep.EquityLiveExFunding,
 		GapUSD:               rep.GapUSD,
@@ -927,7 +993,6 @@ func (e *Engine) Snapshot(ctx context.Context) Snapshot {
 		st := e.liveST[sym]
 		sh := e.shadowLS5[sym]
 		base := e.shadowBase[sym]
-		sst, _ := e.Store.LoadSymbolState(ctx, sym)
 		item := SymbolSnap{
 			Symbol:          sym,
 			MarketID:        e.IDBySym[sym],
@@ -935,12 +1000,13 @@ func (e *Engine) Snapshot(ctx context.Context) Snapshot {
 			LastPrice:       e.lastPrice[sym],
 			Bars:            len(e.bars[sym]),
 			Position:        "FLAT",
-			ConsecLosses:    st.ConsecLosses,
-			PauseUntilTime:  sst.PauseUntilTime,
-			Paused:          st.PauseUntilIdx > len(e.bars[sym])-1,
+			ConsecLosses:    0,
+			PauseUntilTime:  0,
+			Paused:          false,
 			ShadowLS5:       posLabel(sh),
+			ShadowTwin:      posLabel(sh),
 			ShadowBaseline:  posLabel(base),
-			ShadowConsecLS5: sh.ConsecLosses,
+			ShadowConsecLS5: 0,
 		}
 		if st.Position != nil {
 			item.Position = string(st.Position.Direction)

@@ -59,6 +59,9 @@ func (s *Store) migrateTelemetry() error {
 		`ALTER TABLE trades ADD COLUMN risk_usd REAL`,
 		`ALTER TABLE trades ADD COLUMN skipped_reason TEXT`,
 		`ALTER TABLE trades ADD COLUMN live_desync INTEGER DEFAULT 0`,
+		`ALTER TABLE bar_logs ADD COLUMN breakout_atr REAL`,
+		`ALTER TABLE bar_logs ADD COLUMN vol_rank REAL`,
+		`ALTER TABLE bar_logs ADD COLUMN skipped_reason TEXT`,
 	}
 	for _, q := range alters {
 		_, _ = s.DB.Exec(q) // already exists after first run
@@ -73,6 +76,9 @@ type BarLog struct {
 	BarTime                       int64
 	ATR, UpperN, LowerN, Close    float64
 	PauseActive, ResumeReady      bool
+	BreakoutATR                   float64
+	VolRank                       float64
+	SkippedReason                 string
 }
 
 func (s *Store) UpsertBarLog(ctx context.Context, b BarLog) error {
@@ -85,22 +91,85 @@ func (s *Store) UpsertBarLog(ctx context.Context, b BarLog) error {
 	}
 	_, err := s.DB.ExecContext(ctx, `
 INSERT INTO bar_logs(symbol, bar_time, atr, upper_n, lower_n, close, want_baseline, want_ls5,
-  ls5_pause_active, ls5_resume_ready, live_desired, live_actual, shadow_ls5_pos, shadow_baseline_pos)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  ls5_pause_active, ls5_resume_ready, live_desired, live_actual, shadow_ls5_pos, shadow_baseline_pos,
+  breakout_atr, vol_rank, skipped_reason)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(symbol, bar_time) DO UPDATE SET
   atr=excluded.atr, upper_n=excluded.upper_n, lower_n=excluded.lower_n, close=excluded.close,
   want_baseline=excluded.want_baseline, want_ls5=excluded.want_ls5,
   ls5_pause_active=excluded.ls5_pause_active, ls5_resume_ready=excluded.ls5_resume_ready,
   live_desired=excluded.live_desired, live_actual=excluded.live_actual,
-  shadow_ls5_pos=excluded.shadow_ls5_pos, shadow_baseline_pos=excluded.shadow_baseline_pos`,
+  shadow_ls5_pos=excluded.shadow_ls5_pos, shadow_baseline_pos=excluded.shadow_baseline_pos,
+  breakout_atr=excluded.breakout_atr, vol_rank=excluded.vol_rank, skipped_reason=excluded.skipped_reason`,
 		b.Symbol, b.BarTime, b.ATR, b.UpperN, b.LowerN, b.Close, b.WantBaseline, b.WantLS5,
-		pa, rr, b.LiveDesired, b.LiveActual, b.ShadowLS5, b.ShadowBase)
+		pa, rr, b.LiveDesired, b.LiveActual, b.ShadowLS5, b.ShadowBase,
+		b.BreakoutATR, b.VolRank, b.SkippedReason)
 	return err
 }
 
 func (s *Store) PruneBarLogs(ctx context.Context, olderThan int64) error {
 	_, err := s.DB.ExecContext(ctx, `DELETE FROM bar_logs WHERE bar_time < ?`, olderThan)
 	return err
+}
+
+// ListBarLogs returns recent filter/decision rows, newest first.
+func (s *Store) ListBarLogs(ctx context.Context, symbol string, limit int) ([]BarLog, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	q := `SELECT symbol, bar_time, atr, upper_n, lower_n, close, want_baseline, want_ls5,
+  ls5_pause_active, ls5_resume_ready, live_desired, live_actual, shadow_ls5_pos, shadow_baseline_pos,
+  COALESCE(breakout_atr,0), COALESCE(vol_rank,0), COALESCE(skipped_reason,'')
+FROM bar_logs`
+	args := []any{}
+	if symbol != "" {
+		q += ` WHERE symbol=?`
+		args = append(args, symbol)
+	}
+	q += ` ORDER BY bar_time DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.DB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []BarLog
+	for rows.Next() {
+		var b BarLog
+		var pa, rr int
+		if err := rows.Scan(
+			&b.Symbol, &b.BarTime, &b.ATR, &b.UpperN, &b.LowerN, &b.Close,
+			&b.WantBaseline, &b.WantLS5, &pa, &rr, &b.LiveDesired, &b.LiveActual,
+			&b.ShadowLS5, &b.ShadowBase, &b.BreakoutATR, &b.VolRank, &b.SkippedReason,
+		); err != nil {
+			return nil, err
+		}
+		b.PauseActive = pa != 0
+		b.ResumeReady = rr != 0
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// SkipCounts aggregates skipped_reason from bar_logs (brk / vol_rank / ok / empty).
+func (s *Store) SkipCounts(ctx context.Context) (map[string]int, error) {
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT COALESCE(NULLIF(TRIM(skipped_reason), ''), '(none)'), COUNT(*)
+FROM bar_logs GROUP BY 1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var reason string
+		var n int
+		if err := rows.Scan(&reason, &n); err != nil {
+			return nil, err
+		}
+		out[reason] = n
+	}
+	return out, rows.Err()
 }
 
 type CurvePoint struct {

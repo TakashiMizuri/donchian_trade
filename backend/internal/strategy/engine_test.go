@@ -93,7 +93,6 @@ func trendBars(n int, start float64, step float64) []Bar {
 
 func TestLongEntryStopOnNextOpen(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.LS5.Enabled = false
 	cfg.ChannelN = 5
 	cfg.ExitM = 3
 	cfg.ATRPeriod = 3
@@ -124,7 +123,6 @@ func TestLongEntryStopOnNextOpen(t *testing.T) {
 
 func TestStopPriorityOverChannel(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.LS5.Enabled = false
 	cfg.ChannelN = 3
 	cfg.ExitM = 2
 	cfg.ATRPeriod = 2
@@ -151,7 +149,6 @@ func TestStopPriorityOverChannel(t *testing.T) {
 
 func TestNoSameBarReentryAfterExit(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.LS5.Enabled = false
 	cfg.ChannelN = 3
 	cfg.ExitM = 2
 	cfg.ATRPeriod = 2
@@ -177,42 +174,8 @@ func TestNoSameBarReentryAfterExit(t *testing.T) {
 	}
 }
 
-func TestLS5PauseAndEarlyResume(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.ChannelN = 3
-	cfg.ExitM = 2
-	cfg.ATRPeriod = 2
-	cfg.LS5 = LS5Config{Enabled: true, StreakN: 5, PauseBars: 24, ResumeATR: 2.0}
-
-	st := NewState(10_000)
-	// Five gross losses → pause.
-	for i := 0; i < 5; i++ {
-		onTradeClose(&st, cfg, DirBuy, 100, 90, 10+i)
-	}
-	if st.PauseUntilIdx < 0 {
-		t.Fatal("expected pause after 5 losses")
-	}
-	if st.ConsecLosses != 0 {
-		t.Fatalf("counter should reset after pause trigger, got %d", st.ConsecLosses)
-	}
-
-	// Weak breakout during pause — skip.
-	upper, lower := 10.0, 9.0
-	if resumeReady(st, cfg, st.PauseUntilIdx-1, upper, lower, 10.1, 1.0) {
-		t.Fatal("weak breakout should not resume")
-	}
-	// Strong breakout ≥ 2 ATR above channel.
-	if !resumeReady(st, cfg, st.PauseUntilIdx-1, upper, lower, 10+2.1, 1.0) {
-		t.Fatal("2ATR breakout should resume")
-	}
-	if !resumeReady(st, cfg, st.PauseUntilIdx, upper, lower, 9.5, 1.0) {
-		t.Fatal("pause expiry should resume")
-	}
-}
-
 func TestReplayGeneratesLongAndShort(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.LS5.Enabled = false
 	cfg.ChannelN = 5
 	cfg.ExitM = 3
 	cfg.ATRPeriod = 4

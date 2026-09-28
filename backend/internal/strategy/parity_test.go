@@ -42,38 +42,14 @@ func repoRoot(t *testing.T) string {
 }
 
 func TestParityBTCHoldoutBaseline(t *testing.T) {
-	assertParity(t, "btcusdt_1h", "docs/donchian_backtest/streak_smooth/btc_ho_baseline/trades.csv", false)
-}
-
-func TestParityBTCHoldoutLS5(t *testing.T) {
-	assertParity(t, "btcusdt_1h", "docs/donchian_backtest/streak_smooth/btc_ho_ls5_cond_brk2.0/trades.csv", true)
+	assertParity(t, "btcusdt_1h", "docs/donchian_backtest/streak_smooth/btc_ho_baseline/trades.csv")
 }
 
 func TestParityETHHoldoutBaseline(t *testing.T) {
-	assertParity(t, "ethusdt_1h", "docs/donchian_backtest/streak_smooth/eth_ho_baseline/trades.csv", false)
+	assertParity(t, "ethusdt_1h", "docs/donchian_backtest/streak_smooth/eth_ho_baseline/trades.csv")
 }
 
-func TestParityETHHoldoutLS5(t *testing.T) {
-	assertParity(t, "ethusdt_1h", "docs/donchian_backtest/streak_smooth/eth_ho_ls5_cond_brk2.0/trades.csv", true)
-}
-
-func TestParityLS5TakesFewerTradesThanBaseline(t *testing.T) {
-	root := repoRoot(t)
-	bars, err := loadResearchBars(filepath.Join(root, "data", "btcusdt_1h"))
-	if err != nil {
-		t.Skip(err.Error())
-	}
-	base := DefaultConfig()
-	base.LS5.Enabled = false
-	ls5 := DefaultConfig()
-	bt, _ := Replay(bars, base, 10_000, holdoutFrom, holdoutTo)
-	lt, _ := Replay(bars, ls5, 10_000, holdoutFrom, holdoutTo)
-	if len(lt) >= len(bt) {
-		t.Fatalf("ls5 should skip some baseline entries: baseline=%d ls5=%d", len(bt), len(lt))
-	}
-}
-
-func assertParity(t *testing.T, candleDir, csvRel string, ls5 bool) {
+func assertParity(t *testing.T, candleDir, csvRel string) {
 	t.Helper()
 	root := repoRoot(t)
 	bars, err := loadResearchBars(filepath.Join(root, "data", candleDir))
@@ -89,9 +65,6 @@ func assertParity(t *testing.T, candleDir, csvRel string, ls5 bool) {
 	}
 	cfg := DefaultConfig()
 	cfg.FeeRate = 0.0005 // research CSVs were built with Binance VIP0; live/shadow books use 0
-	if !ls5 {
-		cfg.LS5.Enabled = false
-	}
 	got, _ := Replay(bars, cfg, 10_000, holdoutFrom, holdoutTo)
 	closed := make([]Trade, 0, len(got))
 	for _, tr := range got {
@@ -146,8 +119,8 @@ func assertParity(t *testing.T, candleDir, csvRel string, ls5 bool) {
 	if union > 0 {
 		rate = float64(matched) / float64(union)
 	}
-	t.Logf("%s ls5=%v research=%d go=%d matched=%d extra=%d missed=%d rate=%.4f px_drift=%d bars=%d",
-		candleDir, ls5, len(want), len(closed), matched, liveOnly, shadowOnly, rate, pxMiss, len(bars))
+	t.Logf("%s research=%d go=%d matched=%d extra=%d missed=%d rate=%.4f px_drift=%d bars=%d",
+		candleDir, len(want), len(closed), matched, liveOnly, shadowOnly, rate, pxMiss, len(bars))
 	if rate < 0.99 {
 		t.Fatalf("parity %s < 99%% (matched=%d union=%d extra=%d missed=%d)",
 			fmt.Sprintf("%.2f%%", rate*100), matched, union, liveOnly, shadowOnly)

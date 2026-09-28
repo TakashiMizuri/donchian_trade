@@ -19,15 +19,14 @@ var allowedTF = map[string]time.Duration{
 }
 
 const (
-	defaultTF          = "30m"
-	defaultChannelN    = 60
-	defaultExitM       = 30
-	defaultATRPeriod   = 40
+	defaultTF          = "15m"
+	defaultChannelN    = 120
+	defaultExitM       = 60
+	defaultATRPeriod   = 80
 	defaultATRStopMult = 1.5
 	defaultRiskPct     = 1.0
-	defaultMaxRiskUSD  = 1000.0
-	defaultPauseHours  = 24
-	defaultLiveProfile = "ls5_cond_brk2.0"
+	defaultMaxRiskUSD  = 625.0
+	defaultLiveProfile = "brk0.5+vol_rank"
 	FingerprintKey     = "strategy_fingerprint"
 )
 
@@ -71,42 +70,64 @@ func applyStrategyEnv(cfg *Config) error {
 		capUSD = 0
 	}
 
+	defVolBars := (20 * 3600) / wantSec
+	defVolLookback := (42 * 24 * 3600) / wantSec
+
 	profile := strings.ToLower(strings.TrimSpace(getenv("DONCHIAN_LIVE_PROFILE", defaultLiveProfile)))
-	ls5On := true
+	profile = strings.ReplaceAll(profile, " ", "")
+	minBrk := getenvFloat("DONCHIAN_MIN_BREAKOUT_ATR", -1)
+	maxVR := getenvFloat("DONCHIAN_MAX_VOL_RANK", -1)
+
 	switch profile {
-	case "ls5", "ls5_cond_brk2.0":
-		profile = "ls5_cond_brk2.0"
-		ls5On = true
 	case "baseline":
-		ls5On = false
+		if minBrk < 0 {
+			minBrk = 0
+		}
+		if maxVR < 0 {
+			maxVR = 0
+		}
+	case "brk0.5":
+		if minBrk < 0 {
+			minBrk = 0.5
+		}
+		if maxVR < 0 {
+			maxVR = 0
+		}
+	case "vol_rank", "vol_rank0.64":
+		profile = "vol_rank"
+		if minBrk < 0 {
+			minBrk = 0
+		}
+		if maxVR < 0 {
+			maxVR = 0.64
+		}
+	case "brk0.5+vol_rank", "brk0.5_vol_rank", "brk_vol":
+		profile = "brk0.5+vol_rank"
+		if minBrk < 0 {
+			minBrk = 0.5
+		}
+		if maxVR < 0 {
+			maxVR = 0.64
+		}
 	default:
-		return fmt.Errorf("DONCHIAN_LIVE_PROFILE %q (use ls5_cond_brk2.0 or baseline)", profile)
+		return fmt.Errorf("DONCHIAN_LIVE_PROFILE %q (use brk0.5+vol_rank, brk0.5, vol_rank, baseline)", profile)
+	}
+	if minBrk < 0 {
+		minBrk = 0
+	}
+	if maxVR < 0 {
+		maxVR = 0
+	}
+	if maxVR > 1 {
+		return fmt.Errorf("DONCHIAN_MAX_VOL_RANK must be in [0,1], got %g", maxVR)
 	}
 
-	pauseHours := getenvFloat("DONCHIAN_LS5_PAUSE_HOURS", defaultPauseHours)
-	if pauseHours <= 0 {
-		return fmt.Errorf("DONCHIAN_LS5_PAUSE_HOURS must be > 0")
-	}
-	derivedBars := int(pauseHours*3600) / wantSec
-	if int(pauseHours*3600)%wantSec != 0 {
-		return fmt.Errorf("DONCHIAN_LS5_PAUSE_HOURS=%.4g is not a whole number of %s bars", pauseHours, tf)
-	}
-	pauseBars := derivedBars
-	if raw := strings.TrimSpace(os.Getenv("DONCHIAN_LS5_PAUSE_BARS")); raw != "" {
-		got, err := strconv.Atoi(raw)
-		if err != nil || got <= 0 {
-			return fmt.Errorf("DONCHIAN_LS5_PAUSE_BARS must be a positive int, got %q", raw)
+	volBars := getenvInt("DONCHIAN_VOL_RANK_BARS", defVolBars)
+	volLookback := getenvInt("DONCHIAN_VOL_RANK_LOOKBACK", defVolLookback)
+	if maxVR > 0 {
+		if volBars < 2 || volLookback < 2 {
+			return fmt.Errorf("DONCHIAN_VOL_RANK_BARS / LOOKBACK must be ≥ 2 when MAX_VOL_RANK > 0")
 		}
-		if got != derivedBars {
-			return fmt.Errorf("DONCHIAN_LS5_PAUSE_BARS=%d but %g hours on %s is %d bars", got, pauseHours, tf, derivedBars)
-		}
-		pauseBars = got
-	}
-
-	streak := getenvInt("DONCHIAN_LS5_LOSS_STREAK_N", 5)
-	resume := getenvFloat("DONCHIAN_LS5_RESUME_MIN_BREAKOUT_ATR", 2.0)
-	if streak <= 0 || resume < 0 {
-		return fmt.Errorf("ls5 streak / resume ATR invalid")
 	}
 
 	cfg.Resolution = tf
@@ -120,11 +141,17 @@ func applyStrategyEnv(cfg *Config) error {
 	cfg.MaxRiskUSD = capUSD
 	cfg.FeeRate = getenvFloat("DONCHIAN_FEE_RATE_PER_SIDE", 0)
 	cfg.LiveProfile = profile
-	cfg.LS5Enabled = ls5On
-	cfg.LossStreakN = streak
-	cfg.PauseHours = pauseHours
-	cfg.PauseBars = pauseBars
-	cfg.ResumeATR = resume
+	cfg.MinBreakoutATR = minBrk
+	cfg.MaxVolRank = maxVR
+	cfg.VolRankBars = volBars
+	cfg.VolRankLookback = volLookback
+
+	if raw := strings.TrimSpace(os.Getenv("DONCHIAN_SHADOW_BRK_VOL")); raw != "" {
+		cfg.ShadowBrkVol = getenvBool("DONCHIAN_SHADOW_BRK_VOL", false)
+	} else {
+		cfg.ShadowBrkVol = profile == "brk0.5+vol_rank" || profile == "brk0.5" || profile == "vol_rank"
+	}
+
 	cfg.Tag = strings.TrimSpace(getenv("DONCHIAN_TAG", autoTag(cfg)))
 	if cfg.Tag == "" {
 		cfg.Tag = autoTag(cfg)
@@ -134,27 +161,31 @@ func applyStrategyEnv(cfg *Config) error {
 
 func autoTag(cfg *Config) string {
 	tag := fmt.Sprintf("%s_N%d_M%d_ATR%d_R%g", cfg.Resolution, cfg.ChannelN, cfg.ExitM, cfg.ATRPeriod, cfg.RiskPct)
-	if cfg.LS5Enabled {
-		return tag + "+ls5_cond_brk2.0"
+	switch {
+	case cfg.MinBreakoutATR > 0 && cfg.MaxVolRank > 0:
+		return tag + "_brk0.5_vol0.64"
+	case cfg.MinBreakoutATR > 0:
+		return tag + "_brk0.5"
+	case cfg.MaxVolRank > 0:
+		return tag + "_vol0.64"
+	default:
+		return tag + "+baseline"
 	}
-	return tag + "+baseline"
 }
 
 func (c *Config) coreStrategy() strategy.Config {
 	return strategy.Config{
-		ChannelN:    c.ChannelN,
-		ExitM:       c.ExitM,
-		ATRPeriod:   c.ATRPeriod,
-		ATRStopMult: c.ATRStopMult,
-		RiskPct:     c.RiskPct,
-		MaxRiskUSD:  c.MaxRiskUSD,
-		FeeRate:     c.FeeRate,
-		LS5: strategy.LS5Config{
-			Enabled:   c.LS5Enabled,
-			StreakN:   c.LossStreakN,
-			PauseBars: c.PauseBars,
-			ResumeATR: c.ResumeATR,
-		},
+		ChannelN:        c.ChannelN,
+		ExitM:           c.ExitM,
+		ATRPeriod:       c.ATRPeriod,
+		ATRStopMult:     c.ATRStopMult,
+		RiskPct:         c.RiskPct,
+		MaxRiskUSD:      c.MaxRiskUSD,
+		FeeRate:         c.FeeRate,
+		MinBreakoutATR:  c.MinBreakoutATR,
+		MaxVolRank:      c.MaxVolRank,
+		VolRankBars:     c.VolRankBars,
+		VolRankLookback: c.VolRankLookback,
 	}
 }
 
@@ -162,23 +193,22 @@ func (c *Config) LiveConfig() strategy.Config {
 	return c.coreStrategy()
 }
 
-func (c *Config) ShadowLS5Config() strategy.Config {
-	cfg := c.coreStrategy()
-	cfg.LS5.Enabled = true
-	return cfg
+// ShadowTwinConfig matches live entry filters (stored under profile shadow_ls5).
+func (c *Config) ShadowTwinConfig() strategy.Config {
+	return c.coreStrategy()
 }
 
 func (c *Config) BaselineConfig() strategy.Config {
 	cfg := c.coreStrategy()
-	cfg.LS5.Enabled = false
+	cfg.MinBreakoutATR = 0
+	cfg.MaxVolRank = 0
 	return cfg
 }
 
-// Fingerprint is stored in SQLite so a 30m process cannot eat a 1h journal.
 func (c *Config) Fingerprint() string {
-	return fmt.Sprintf("tf=%s n=%d m=%d atr=%d x%.4g risk=%.4g cap=%.4g fee=%.6g ls5=%t pause=%d resume=%.4g",
+	return fmt.Sprintf("tf=%s n=%d m=%d atr=%d x%.4g risk=%.4g cap=%.4g fee=%.6g brk=%.4g vol=%.4g vb=%d vl=%d",
 		c.Resolution, c.ChannelN, c.ExitM, c.ATRPeriod, c.ATRStopMult, c.RiskPct, c.MaxRiskUSD, c.FeeRate,
-		c.LS5Enabled, c.PauseBars, c.ResumeATR)
+		c.MinBreakoutATR, c.MaxVolRank, c.VolRankBars, c.VolRankLookback)
 }
 
 func (c *Config) ProfileLog() []any {
@@ -193,9 +223,13 @@ func (c *Config) ProfileLog() []any {
 		"max_risk_usd", c.MaxRiskUSD,
 		"fee", c.FeeRate,
 		"live_profile", c.LiveProfile,
-		"ls5_pause_bars", c.PauseBars,
-		"ls5_pause_hours", c.PauseHours,
-		"resume_atr", c.ResumeATR,
+		"min_breakout_atr", c.MinBreakoutATR,
+		"max_vol_rank", c.MaxVolRank,
+		"vol_rank_bars", c.VolRankBars,
+		"vol_rank_lookback", c.VolRankLookback,
+		"shadow_twin", c.ShadowBrkVol,
+		"shadow_baseline", c.ShadowBaseline,
+		"log_dir", c.LogDir,
 		"symbols", strings.Join(c.Symbols, ","),
 	}
 }

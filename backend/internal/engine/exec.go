@@ -114,7 +114,7 @@ func (e *Engine) persistOpenFunding(ctx context.Context) {
 	}
 }
 
-func (e *Engine) recordEntryFill(ctx context.Context, symbol string, tradeID, clientIdx int64, txHash string, shadowPx float64) float64 {
+func (e *Engine) recordEntryFill(ctx context.Context, symbol string, tradeID, clientIdx int64, txHash string, shadowPx float64, dir strategy.Direction) float64 {
 	livePx, fee := e.waitFill(ctx, symbol, clientIdx, txHash, 0)
 	if livePx <= 0 {
 		e.Log.Warn("entry fill not found, using signal price", "symbol", symbol, "client", clientIdx, "px", shadowPx)
@@ -126,6 +126,14 @@ func (e *Engine) recordEntryFill(ctx context.Context, symbol string, tradeID, cl
 		if acc, err := e.HTTP.Account(ctx, e.Cfg.AccountIndex); err == nil {
 			e.markFunding(acc)
 		}
+	}
+	if e.Flog != nil {
+		buy := dir == strategy.DirBuy
+		entrySlip, _, _, _ := telemetry.SlipBps(buy, livePx, shadowPx, 0, 0)
+		e.Flog.Event("entry_fill", map[string]any{
+			"symbol": symbol, "trade_id": tradeID, "client_idx": clientIdx,
+			"live_px": livePx, "shadow_px": shadowPx, "entry_slip_bps": entrySlip, "fee": fee,
+		})
 	}
 	// funding basis was frozen at send time in executeEntry; do not re-seed here
 	return livePx
@@ -177,9 +185,18 @@ func (e *Engine) finishCloseLive(ctx context.Context, symbol string, tradeID int
 	}
 	funding := e.pullFunding(symbol)
 	gross, net := livePnL(t.Direction, qty, liveEntry, liveExit, entryFee, exitFee, funding)
-	_ = e.Store.CloseTrade(ctx, tradeID, t.ExitTime, liveExit, string(t.Outcome), gross, entryFee, exitFee, funding, net, st.ConsecLosses, int64(st.PauseUntilIdx))
+	_ = e.Store.CloseTrade(ctx, tradeID, t.ExitTime, liveExit, string(t.Outcome), gross, entryFee, exitFee, funding, net, 0, 0)
 	_ = e.Store.SetExitShadow(ctx, tradeID, shadowExit)
 	e.Risk.AddRealized(net)
+	if e.Flog != nil {
+		buy := t.Direction == strategy.DirBuy
+		_, exitSlip, _, _ := telemetry.SlipBps(buy, liveEntry, t.EntryPrice, liveExit, shadowExit)
+		e.Flog.Event("exit_fill", map[string]any{
+			"symbol": symbol, "trade_id": tradeID, "outcome": t.Outcome,
+			"live_entry": liveEntry, "live_exit": liveExit, "shadow_exit": shadowExit,
+			"exit_slip_bps": exitSlip, "net": net, "gross": gross, "funding": funding,
+		})
+	}
 }
 
 func (e *Engine) slClientIdx(symbol string) int64 {

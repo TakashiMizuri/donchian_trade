@@ -95,11 +95,7 @@ func formatStatus(sn engine.Snapshot) string {
 		if s.Position != "FLAT" && s.Position != "" {
 			fmt.Fprintf(&b, "  qty %s · вход %s · стоп %s\n", trimFloat(s.Qty), usd(s.Entry), usd(s.Stop))
 		}
-		fmt.Fprintf(&b, "  тень %s · убытки %d/%d", sideRU(s.ShadowLS5), s.ConsecLosses, s.ShadowConsecLS5)
-		if s.Paused {
-			b.WriteString(" · пауза")
-		}
-		b.WriteString("\n")
+		fmt.Fprintf(&b, "  тень %s\n", sideRU(s.ShadowLS5))
 	}
 	return strings.TrimSpace(b.String())
 }
@@ -160,7 +156,7 @@ func formatDailyHTML(date string, sn engine.Snapshot, trades []store.TradeRow) s
 	fmt.Fprintf(&b, "%s\n", html.EscapeString(verdictRU(sn.Verdict)))
 	fmt.Fprintf(&b, "входы %s · исполнение %s · PnL %s\n\n", checkRU(r.StatusA), checkRU(r.StatusB), checkRU(r.StatusC))
 	fmt.Fprintf(&b, "<b>Live</b>  %s  (без funding %s)\n", usd(r.EquityLive), usd(r.EquityLiveExFunding))
-	fmt.Fprintf(&b, "<b>Тень ls5</b>  %s\n", usd(r.EquityShadowLS5))
+	fmt.Fprintf(&b, "<b>Тень (фильтры)</b>  %s\n", usd(r.EquityShadowLS5))
 	fmt.Fprintf(&b, "без паузы  %s\n", usd(r.EquityShadowBaseline))
 	fmt.Fprintf(&b, "разрыв %s (%s)\n", usd(r.GapUSD), pct(r.GapPct))
 	fmt.Fprintf(&b, "просадка Live %s · тень %s\n\n", pct(r.DDLive), pct(r.DDShadowLS5))

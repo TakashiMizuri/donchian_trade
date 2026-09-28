@@ -19,6 +19,7 @@ export type SymbolSnap = {
 export type Report = {
   equity_live: number;
   equity_shadow_ls5: number;
+  equity_shadow_twin?: number;
   equity_shadow_baseline: number;
   equity_live_ex_funding: number;
   gap_usd: number;
@@ -59,6 +60,7 @@ export type Status = {
   daily_pnl: number;
   equity: number;
   equity_shadow_ls5: number;
+  equity_shadow_twin?: number;
   equity_shadow_baseline: number;
   equity_live_ex_funding: number;
   gap_usd: number;
@@ -108,6 +110,59 @@ export type Trade = {
   entry_px_live?: number;
   exit_px_shadow?: number;
   exit_px_live?: number;
+  entry_slip_bps?: number;
+  exit_slip_bps?: number;
+  side_slip_bps?: number;
+  r_multiple?: number;
+  risk_usd?: number;
+  risk_distance?: number;
+};
+
+export type SlipStats = {
+  median_bps: number;
+  p90_bps: number;
+  n: number;
+};
+
+export type Analysis = {
+  trades: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  avg_r: number;
+  expectancy_r: number;
+  net: number;
+  loss_streak: number;
+  max_loss_streak: number;
+  days_since_go_live: number;
+  go_live_ts: number;
+  entry_slip: SlipStats;
+  exit_slip: SlipStats;
+  side_slip: SlipStats;
+  sl_exit_slip: SlipStats;
+  skip_counts: Record<string, number>;
+  daily_pnl: { date: string; net: number }[];
+  curve_points: number;
+  match_rate_ltd: number;
+  verdict: string;
+};
+
+export type BarLog = {
+  symbol: string;
+  bar_time: number;
+  atr: number;
+  upper_n: number;
+  lower_n: number;
+  close: number;
+  want_baseline: boolean;
+  want_live: boolean;
+  live_desired: string;
+  live_actual: string;
+  shadow_twin: string;
+  shadow_baseline: string;
+  breakout_atr: number;
+  vol_rank: number;
+  skipped_reason: string;
 };
 
 export type CurvePoint = {
@@ -118,6 +173,7 @@ export type CurvePoint = {
   upnl_live: number;
   wallet_cash: number;
   equity_shadow_ls5: number;
+  equity_shadow_twin?: number;
   equity_shadow_baseline: number;
   gap_vs_ls5: number;
   cum_funding: number;
@@ -186,6 +242,14 @@ export const api = {
   mismatches: () => req<Mismatch[]>("/api/mismatches"),
   cash: () => req<{ cash_base: number; flows: CashFlow[] }>("/api/cash"),
   report: () => req<DailyReport>("/api/report"),
+  analysis: () => req<Analysis>("/api/analysis"),
+  barLogs: (symbol?: string, limit?: number) => {
+    const q = new URLSearchParams();
+    if (symbol) q.set("symbol", symbol);
+    if (limit != null) q.set("limit", String(limit));
+    const qs = q.toString();
+    return req<BarLog[]>(`/api/bar_logs${qs ? `?${qs}` : ""}`);
+  },
   kill: () => req<{ ok: string }>("/api/kill", { method: "POST" }),
   resume: () => req<{ ok: string }>("/api/resume", { method: "POST" }),
 };

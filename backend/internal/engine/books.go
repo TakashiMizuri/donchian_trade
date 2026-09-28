@@ -49,11 +49,6 @@ func (e *Engine) typicalRisk() float64 {
 func (e *Engine) restoreBook(ctx context.Context, symbol, book string, bars []strategy.Bar) strategy.State {
 	net, _, _, _ := e.Store.SumNet(ctx, book)
 	st := strategy.NewState(e.cashBase() + net)
-	sst, err := e.Store.LoadSymbolState(ctx, bookKey(symbol, book))
-	if err == nil {
-		st.ConsecLosses = sst.ConsecLosses
-		st.PauseUntilIdx = sst.PauseUntilIdx
-	}
 	open, err := e.Store.OpenBookTrade(ctx, symbol, book)
 	if err == nil && open != nil {
 		st.Position = &strategy.Position{
@@ -72,9 +67,7 @@ func (e *Engine) restoreBook(ctx context.Context, symbol, book string, bars []st
 
 func (e *Engine) persistBook(ctx context.Context, symbol, book string, st strategy.State, bars []strategy.Bar) {
 	sst := store.SymbolState{
-		ConsecLosses:  st.ConsecLosses,
-		PauseUntilIdx: st.PauseUntilIdx,
-		BarsSeen:      len(bars),
+		BarsSeen: len(bars),
 	}
 	if len(bars) > 0 {
 		sst.LastBarTime = bars[len(bars)-1].Time
@@ -82,12 +75,6 @@ func (e *Engine) persistBook(ctx context.Context, symbol, book string, st strate
 	if st.Position != nil {
 		sst.LastSignalTime = st.Position.SignalTime
 		sst.OpenTradeID = int64(st.Position.ID)
-	}
-	if st.PauseUntilIdx >= 0 && st.PauseUntilIdx < len(bars) {
-		sst.PauseUntilTime = bars[st.PauseUntilIdx].Time
-	} else if st.PauseUntilIdx >= len(bars) && len(bars) > 0 {
-		extra := st.PauseUntilIdx - (len(bars) - 1)
-		sst.PauseUntilTime = bars[len(bars)-1].Time + int64(extra)*3600
 	}
 	_ = e.Store.SaveSymbolState(ctx, bookKey(symbol, book), sst)
 }
@@ -132,11 +119,11 @@ func (e *Engine) stepBook(ctx context.Context, symbol, book string, bars []strat
 		if err != nil || row == nil {
 			id, _, _ := e.Store.TryOpenTrade(ctx, symbol, book, string(t.Direction), t.SignalTime, t.EntryTime, t.EntryPrice, t.StopLoss, t.RiskDistance, t.Quantity, 0)
 			if id > 0 {
-				_ = e.Store.CloseTrade(ctx, id, t.ExitTime, t.ExitPrice, string(t.Outcome), t.Gross, t.EntryFee, t.ExitFee, 0, t.Net, st.ConsecLosses, int64(st.PauseUntilIdx))
+				_ = e.Store.CloseTrade(ctx, id, t.ExitTime, t.ExitPrice, string(t.Outcome), t.Gross, t.EntryFee, t.ExitFee, 0, t.Net, 0, 0)
 			}
 			return
 		}
-		_ = e.Store.CloseTrade(ctx, row.ID, t.ExitTime, t.ExitPrice, string(t.Outcome), t.Gross, t.EntryFee, t.ExitFee, 0, t.Net, st.ConsecLosses, int64(st.PauseUntilIdx))
+		_ = e.Store.CloseTrade(ctx, row.ID, t.ExitTime, t.ExitPrice, string(t.Outcome), t.Gross, t.EntryFee, t.ExitFee, 0, t.Net, 0, 0)
 	}
 }
 
@@ -145,29 +132,38 @@ func (e *Engine) writeBarLog(ctx context.Context, symbol string, bars []strategy
 		return
 	}
 	upper, lower := strategy.ChannelAt(bars, i, e.liveCfg.ChannelN)
-	c := bars[i].Close
+	b := bars[i]
+	c := b.Close
 	a := 0.0
 	if i < len(atr) {
 		a = atr[i]
 	}
 	wantBase := strategy.SignalWant(c, upper, lower)
-	wantLS5 := wantBase
-	pause := e.ls5Cfg.LS5.Enabled && i < ls5.PauseUntilIdx
-	resume := true
-	if pause {
-		resume = c > upper+e.ls5Cfg.LS5.ResumeATR*a || c < lower-e.ls5Cfg.LS5.ResumeATR*a
-		if a <= 0 {
-			resume = false
-		}
-		if !resume {
-			wantLS5 = ""
-		}
+	probe := strategy.ProbeEntry(bars, atr, i, e.liveCfg)
+	wantLive := probe.Direction
+	if probe.SkipReason != "" && probe.SkipReason != "ok" {
+		wantLive = ""
+	}
+	skip := probe.SkipReason
+	if wantBase == "" {
+		skip = ""
 	}
 	_ = e.Store.UpsertBarLog(ctx, store.BarLog{
-		Symbol: symbol, BarTime: bars[i].Time, ATR: a, UpperN: upper, LowerN: lower, Close: c,
-		WantBaseline: string(wantBase), WantLS5: string(wantLS5),
-		PauseActive: pause, ResumeReady: !pause || resume,
-		LiveDesired: string(wantLS5), LiveActual: posLabel(live),
+		Symbol: symbol, BarTime: b.Time, ATR: a, UpperN: upper, LowerN: lower, Close: c,
+		WantBaseline: string(wantBase), WantLS5: string(wantLive),
+		PauseActive: false, ResumeReady: true,
+		LiveDesired: string(wantLive), LiveActual: posLabel(live),
 		ShadowLS5: posLabel(ls5), ShadowBase: posLabel(base),
+		BreakoutATR: probe.BreakoutATR, VolRank: probe.VolRank, SkippedReason: skip,
 	})
+	if e.Flog != nil {
+		e.Flog.Event("bar", map[string]any{
+			"symbol": symbol, "bar_time": b.Time,
+			"open": b.Open, "high": b.High, "low": b.Low, "close": c, "volume": b.Volume,
+			"atr": a, "upper_n": upper, "lower_n": lower,
+			"vol_rank": probe.VolRank, "breakout_atr": probe.BreakoutATR, "skip": skip,
+			"live_desired": string(wantLive), "live_pos": posLabel(live),
+			"twin_pos": posLabel(ls5), "base_pos": posLabel(base),
+		})
+	}
 }

@@ -25,7 +25,7 @@ func EquityPNG(live, shadow []float64) ([]byte, error) {
 	fill(img, img.Bounds(), colBg)
 	fill(img, image.Rect(24, 24, W-24, H-24), colCard)
 
-	drawString(img, 40, 36, "LIVE vs SHADOW LS5", colInk)
+	drawString(img, 40, 36, "LIVE vs TWIN SHADOW", colInk)
 	fill(img, image.Rect(700, 30, 712, 42), colLive)
 	drawString(img, 718, 36, "LIVE", colInk)
 	fill(img, image.Rect(770, 30, 782, 42), colShadow)

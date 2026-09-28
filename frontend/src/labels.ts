@@ -1,7 +1,15 @@
 const PROFILE: Record<string, string> = {
   live: "Live",
-  shadow_ls5: "Тень",
-  shadow_baseline: "Без паузы",
+  shadow_ls5: "Тень (фильтры)",
+  shadow_baseline: "Baseline",
+};
+
+const SKIP_REASON: Record<string, string> = {
+  ok: "сигнал прошёл",
+  brk: "нет пробоя",
+  vol_rank: "низкий vol rank",
+  "": "—",
+  "(none)": "без метки",
 };
 
 const SIDE: Record<string, string> = {
@@ -79,6 +87,11 @@ const EVENT_KIND: Record<string, string> = {
 
 export function profileLabel(v: string) {
   return PROFILE[v] ?? v;
+}
+
+export function skipReasonLabel(v: string) {
+  if (!v) return SKIP_REASON[""];
+  return SKIP_REASON[v] ?? v;
 }
 
 export function sideLabel(v: string) {

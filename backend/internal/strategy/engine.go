@@ -14,15 +14,13 @@ type Position struct {
 }
 
 type State struct {
-	Position      *Position
-	ConsecLosses  int
-	PauseUntilIdx int
-	Equity        float64
-	NextID        int
+	Position *Position
+	Equity   float64
+	NextID   int
 }
 
 func NewState(equity float64) State {
-	return State{PauseUntilIdx: -1, Equity: equity, NextID: 1}
+	return State{Equity: equity, NextID: 1}
 }
 
 type ActionKind string
@@ -44,6 +42,10 @@ type Action struct {
 	SignalIdx  int
 	FillIdx    int
 	FillTime   int64
+	// Diagnostics for journal (set on enter decisions / filter skips via ProbeEntry).
+	BreakoutATR float64
+	VolRank     float64
+	SkipReason  string // "", "vol_rank", "brk", "warmup"
 }
 
 func ChannelAt(bars []Bar, i, lookback int) (upper, lower float64) {
@@ -79,40 +81,6 @@ func channelMaxMin(bars []Bar, from, to int) (upper, lower float64) {
 		}
 	}
 	return
-}
-
-func resumeReady(st State, cfg Config, i int, upperN, lowerN, c, atrI float64) bool {
-	if !cfg.LS5.Enabled || cfg.LS5.StreakN <= 0 {
-		return true
-	}
-	if i >= st.PauseUntilIdx {
-		return true
-	}
-	if atrI <= 0 {
-		return false
-	}
-	if cfg.LS5.ResumeATR > 0 && (c > upperN+cfg.LS5.ResumeATR*atrI || c < lowerN-cfg.LS5.ResumeATR*atrI) {
-		return true
-	}
-	return false
-}
-
-func onTradeClose(st *State, cfg Config, dir Direction, entry, exit float64, exitBarI int) {
-	if !cfg.LS5.Enabled || cfg.LS5.StreakN <= 0 {
-		return
-	}
-	if GrossMove(dir, entry, exit) > 0 {
-		st.ConsecLosses = 0
-		return
-	}
-	st.ConsecLosses++
-	if st.ConsecLosses >= cfg.LS5.StreakN {
-		pause := exitBarI + cfg.LS5.PauseBars
-		if pause > st.PauseUntilIdx {
-			st.PauseUntilIdx = pause
-		}
-		st.ConsecLosses = 0
-	}
 }
 
 // Decide inspects closed bar i. nextOpen/nextTime stand in for bar i+1 open
@@ -173,24 +141,13 @@ func Decide(bars []Bar, atr []float64, i int, nextOpen float64, nextTime int64, 
 	if atrI <= 0 {
 		return Action{Kind: ActionNone}
 	}
-	from := i - cfg.ChannelN
-	if from < 0 {
-		from = 0
+	// Research order on a channel break: vol_rank gate, then min_breakout_atr.
+	probe := ProbeEntry(bars, atr, i, cfg)
+	if probe.Direction == "" {
+		return Action{Kind: ActionNone, BreakoutATR: probe.BreakoutATR, VolRank: probe.VolRank, SkipReason: probe.SkipReason}
 	}
-	upperN, lowerN := channelMaxMin(bars, from, i)
-	c := bars[i].Close
-	if !resumeReady(st, cfg, i, upperN, lowerN, c, atrI) {
-		return Action{Kind: ActionNone}
-	}
-	var want Direction
-	switch {
-	case c > upperN:
-		want = DirBuy
-	case c < lowerN:
-		want = DirSell
-	default:
-		return Action{Kind: ActionNone}
-	}
+	want := probe.Direction
+
 	var stop, risk float64
 	if want == DirBuy {
 		stop = nextOpen - cfg.ATRStopMult*atrI
@@ -203,16 +160,75 @@ func Decide(bars []Bar, atr []float64, i int, nextOpen float64, nextTime int64, 
 		return Action{Kind: ActionNone}
 	}
 	return Action{
-		Kind:       ActionEnter,
-		Direction:  want,
-		Price:      nextOpen,
-		Stop:       stop,
-		Risk:       risk,
-		SignalTime: bars[i].Time,
-		SignalIdx:  i,
-		FillIdx:    i + 1,
-		FillTime:   nextTime,
+		Kind:        ActionEnter,
+		Direction:   want,
+		Price:       nextOpen,
+		Stop:        stop,
+		Risk:        risk,
+		SignalTime:  bars[i].Time,
+		SignalIdx:   i,
+		FillIdx:     i + 1,
+		FillTime:    nextTime,
+		BreakoutATR: probe.BreakoutATR,
+		VolRank:     probe.VolRank,
+		SkipReason:  "ok",
 	}
+}
+
+// ProbeEntry evaluates channel break + entry filters without sizing/stop.
+// Used by Decide and bar journal. SkipReason: "" (no break), "vol_rank", "brk", "ok".
+func ProbeEntry(bars []Bar, atr []float64, i int, cfg Config) Action {
+	if i < 0 || i >= len(bars) {
+		return Action{}
+	}
+	atrI := 0.0
+	if i < len(atr) {
+		atrI = atr[i]
+	}
+	from := i - cfg.ChannelN
+	if from < 0 {
+		from = 0
+	}
+	upperN, lowerN := channelMaxMin(bars, from, i)
+	c := bars[i].Close
+
+	var raw Direction
+	switch {
+	case c > upperN:
+		raw = DirBuy
+	case c < lowerN:
+		raw = DirSell
+	default:
+		return Action{}
+	}
+	brk := BreakoutATRDistance(c, upperN, lowerN, atrI, raw)
+	out := Action{Direction: raw, BreakoutATR: brk}
+
+	if cfg.MaxVolRank > 0 {
+		if cfg.VolRankBars < 2 || cfg.VolRankLookback < 2 {
+			out.Direction = ""
+			out.SkipReason = "vol_rank"
+			return out
+		}
+		vr, ok := VolRankAt(bars, i, cfg.VolRankBars, cfg.VolRankLookback)
+		out.VolRank = vr
+		if !ok || math.IsNaN(vr) || vr >= cfg.MaxVolRank {
+			out.Direction = ""
+			out.SkipReason = "vol_rank"
+			return out
+		}
+	}
+
+	if cfg.MinBreakoutATR > 0 {
+		if atrI <= 0 || brk < cfg.MinBreakoutATR {
+			out.Direction = ""
+			out.SkipReason = "brk"
+			return out
+		}
+	}
+
+	out.SkipReason = "ok"
+	return out
 }
 
 func Apply(st *State, cfg Config, bars []Bar, act Action) *Trade {
@@ -269,7 +285,6 @@ func Apply(st *State, cfg Config, bars []Bar, act Action) *Trade {
 		if pos.EntryIdx >= 0 && pos.EntryIdx < len(bars) {
 			t.EntryTime = bars[pos.EntryIdx].Time
 		}
-		onTradeClose(st, cfg, pos.Direction, pos.EntryPrice, act.Price, act.FillIdx)
 		st.Equity = newEq
 		st.Position = nil
 		return t

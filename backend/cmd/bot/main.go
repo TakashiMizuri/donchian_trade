@@ -12,6 +12,7 @@ import (
 	"donchian.trade/bot/internal/api"
 	"donchian.trade/bot/internal/config"
 	"donchian.trade/bot/internal/engine"
+	"donchian.trade/bot/internal/flog"
 	"donchian.trade/bot/internal/exchange/lighter"
 	"donchian.trade/bot/internal/notify"
 	"donchian.trade/bot/internal/risk"
@@ -73,6 +74,13 @@ func main() {
 	}
 
 	eng := engine.New(cfg, st, httpClient, signer, markets, notify.Nop{}, rg, log)
+	fl, err := flog.New(cfg.LogDir)
+	if err != nil {
+		log.Error("flog", "err", err)
+		os.Exit(1)
+	}
+	defer fl.Close()
+	eng.Flog = fl
 
 	var tg *telegram.Bot
 	if cfg.TelegramToken != "" {

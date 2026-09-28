@@ -186,14 +186,14 @@ func (e *Engine) persistMismatches(ctx context.Context) {
 	for k := range liveKeys {
 		if _, ok := shKeys[k]; !ok {
 			if has, _ := e.Store.HasMismatch(ctx, "live_only", k.Symbol, k.Direction, k.SignalTime); !has {
-				_ = e.Store.InsertMismatch(ctx, "live_only", k.Symbol, k.Direction, k.SignalTime, "live entry without shadow-ls5")
+				_ = e.Store.InsertMismatch(ctx, "live_only", k.Symbol, k.Direction, k.SignalTime, "live entry without twin shadow")
 			}
 		}
 	}
 	for k := range shKeys {
 		if _, ok := liveKeys[k]; !ok {
 			if has, _ := e.Store.HasMismatch(ctx, "shadow_only", k.Symbol, k.Direction, k.SignalTime); !has {
-				_ = e.Store.InsertMismatch(ctx, "shadow_only", k.Symbol, k.Direction, k.SignalTime, "shadow-ls5 entry without live")
+				_ = e.Store.InsertMismatch(ctx, "shadow_only", k.Symbol, k.Direction, k.SignalTime, "twin shadow entry without live")
 			}
 		}
 	}
@@ -255,11 +255,19 @@ func (e *Engine) WriteDailyReport(ctx context.Context, date string) {
 	for _, sym := range e.Cfg.Symbols {
 		st := e.liveST[sym]
 		sh := e.shadowLS5[sym]
-		extra += fmt.Sprintf("%s live_streak=%d live_pos=%s shadow_streak=%d shadow_pos=%s\n",
-			sym, st.ConsecLosses, posLabel(st), sh.ConsecLosses, posLabel(sh))
+		extra += fmt.Sprintf("%s live_pos=%s twin_pos=%s\n", sym, posLabel(st), posLabel(sh))
 	}
 	e.mu.Unlock()
 	body := telemetry.FormatDaily(date, rep, extra)
+	if e.Flog != nil {
+		e.Flog.Event("daily", map[string]any{
+			"date": date, "verdict": rep.Verdict,
+			"status_a": rep.StatusA, "status_b": rep.StatusB, "status_c": rep.StatusC,
+			"gap_usd": rep.GapUSD, "gap_pct": rep.GapPct,
+			"match_ltd": rep.MatchRateLTD, "match_7d": rep.MatchRate7d,
+			"slip_median_bps": rep.SideSlipMedianBps,
+		})
+	}
 	_ = e.Store.SaveDailyReport(ctx, date, body, rep.Verdict)
 	dir := filepath.Join(e.dataDir(), "reports")
 	_ = os.MkdirAll(dir, 0o755)

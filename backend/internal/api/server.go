@@ -44,6 +44,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/trades", s.auth(s.trades))
 	mux.HandleFunc("GET /api/equity", s.auth(s.equity))
 	mux.HandleFunc("GET /api/stats", s.auth(s.stats))
+	mux.HandleFunc("GET /api/analysis", s.auth(s.analysis))
+	mux.HandleFunc("GET /api/bar_logs", s.auth(s.barLogs))
 	mux.HandleFunc("GET /api/events", s.auth(s.events))
 	mux.HandleFunc("GET /api/telemetry", s.auth(s.telemetry))
 	mux.HandleFunc("GET /api/mismatches", s.auth(s.mismatches))
@@ -181,29 +183,6 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.Engine.Snapshot(r.Context()))
-}
-
-func (s *Server) trades(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.Store.ListTrades(r.Context(), 800)
-	if err != nil {
-		writeJSON(w, 500, map[string]string{"error": err.Error()})
-		return
-	}
-	out := make([]map[string]any, 0, len(rows))
-	for _, t := range rows {
-		out = append(out, map[string]any{
-			"id": t.ID, "symbol": t.Symbol, "profile": t.Profile, "direction": t.Direction,
-			"signal_time": t.SignalTime, "entry_time": t.EntryTime.Int64, "entry_price": t.EntryPrice.Float64,
-			"stop": t.Stop.Float64, "exit_time": t.ExitTime.Int64, "exit_price": t.ExitPrice.Float64,
-			"outcome": t.Outcome.String, "risk_distance": t.RiskDistance.Float64, "quantity": t.Quantity.Float64,
-			"gross": t.Gross.Float64, "entry_fee": t.EntryFee.Float64, "exit_fee": t.ExitFee.Float64,
-			"net": t.Net.Float64, "funding": t.Funding.Float64,
-			"consec_losses":   t.ConsecLosses.Int64,
-			"entry_px_shadow": t.EntryPxShadow, "entry_px_live": t.EntryPxLive,
-			"exit_px_shadow": t.ExitPxShadow, "exit_px_live": t.ExitPxLive,
-		})
-	}
-	writeJSON(w, 200, out)
 }
 
 func (s *Server) equity(w http.ResponseWriter, r *http.Request) {

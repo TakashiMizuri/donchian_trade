@@ -18,68 +18,56 @@ func loadWithPass(t *testing.T) *Config {
 	return cfg
 }
 
-func TestDefaultEnvIs30mCalendar(t *testing.T) {
+func TestDefaultEnvIs15mBrkVol(t *testing.T) {
 	cfg := loadWithPass(t)
-	if cfg.Resolution != "30m" || cfg.Timeframe != 30*time.Minute || cfg.BarSeconds != 1800 {
+	if cfg.Resolution != "15m" || cfg.Timeframe != 15*time.Minute || cfg.BarSeconds != 900 {
 		t.Fatalf("tf %+v %s %d", cfg.Timeframe, cfg.Resolution, cfg.BarSeconds)
 	}
-	if cfg.ChannelN != 60 || cfg.ExitM != 30 || cfg.ATRPeriod != 40 || cfg.ATRStopMult != 1.5 {
-		t.Fatalf("channel n=%d m=%d atr=%d x=%v", cfg.ChannelN, cfg.ExitM, cfg.ATRPeriod, cfg.ATRStopMult)
+	if cfg.ChannelN != 120 || cfg.ExitM != 60 || cfg.ATRPeriod != 80 {
+		t.Fatalf("channel n=%d m=%d atr=%d", cfg.ChannelN, cfg.ExitM, cfg.ATRPeriod)
 	}
-	if cfg.RiskPct != 1 || cfg.MaxRiskUSD != 1000 {
-		t.Fatalf("risk %v cap %v", cfg.RiskPct, cfg.MaxRiskUSD)
+	if cfg.LiveProfile != "brk0.5+vol_rank" || cfg.MinBreakoutATR != 0.5 || cfg.MaxVolRank != 0.64 {
+		t.Fatalf("profile %q brk=%v vol=%v", cfg.LiveProfile, cfg.MinBreakoutATR, cfg.MaxVolRank)
 	}
-	if !cfg.LS5Enabled || cfg.PauseBars != 48 || cfg.PauseHours != 24 {
-		t.Fatalf("ls5 on=%v pause bars=%d hours=%v", cfg.LS5Enabled, cfg.PauseBars, cfg.PauseHours)
+	if !cfg.ShadowBrkVol || !cfg.ShadowBaseline {
+		t.Fatalf("shadows twin=%v base=%v", cfg.ShadowBrkVol, cfg.ShadowBaseline)
 	}
-	if cfg.FeeRate != 0 {
-		t.Fatalf("fee %v", cfg.FeeRate)
+	if cfg.LogDir == "" {
+		t.Fatal("log dir empty")
 	}
-	if cfg.Tag == "" || cfg.LiveProfile != "ls5_cond_brk2.0" {
-		t.Fatalf("tag %q profile %q", cfg.Tag, cfg.LiveProfile)
+	live := cfg.LiveConfig()
+	base := cfg.BaselineConfig()
+	if live.MinBreakoutATR != 0.5 || base.MinBreakoutATR != 0 {
+		t.Fatalf("filters live=%+v base=%+v", live, base)
 	}
 }
 
-func TestOneHourPresetMatchesResearchFixture(t *testing.T) {
+func TestOneHourBaselinePreset(t *testing.T) {
 	t.Setenv("DONCHIAN_TIMEFRAME", "1h")
 	t.Setenv("DONCHIAN_CHANNEL_N", "30")
 	t.Setenv("DONCHIAN_EXIT_M", "15")
 	t.Setenv("DONCHIAN_ATR_PERIOD", "20")
-	t.Setenv("DONCHIAN_ATR_STOP_MULT", "1.5")
-	t.Setenv("DONCHIAN_RISK_PCT", "1")
+	t.Setenv("DONCHIAN_LIVE_PROFILE", "baseline")
 	t.Setenv("DONCHIAN_MAX_RISK_USD", "1000")
-	t.Setenv("DONCHIAN_LIVE_PROFILE", "ls5_cond_brk2.0")
-	t.Setenv("DONCHIAN_LS5_PAUSE_HOURS", "24")
+	t.Setenv("DONCHIAN_MIN_BREAKOUT_ATR", "0")
+	t.Setenv("DONCHIAN_MAX_VOL_RANK", "0")
 	cfg := loadWithPass(t)
 	got := cfg.LiveConfig()
 	want := strategy.DefaultConfig()
 	if got.ChannelN != want.ChannelN || got.ExitM != want.ExitM || got.ATRPeriod != want.ATRPeriod {
 		t.Fatalf("n/m/atr got %+v want %+v", got, want)
 	}
-	if got.LS5.PauseBars != 24 || cfg.Resolution != "1h" || cfg.Timeframe != time.Hour {
-		t.Fatalf("1h pause/tf %+v %s", got.LS5, cfg.Resolution)
-	}
-	if got.FeeRate != 0 || got.MaxRiskUSD != 1000 || got.ATRStopMult != 1.5 {
-		t.Fatalf("sizing %+v", got)
+	if cfg.ShadowBrkVol {
+		t.Fatal("baseline should not auto twin")
 	}
 }
 
 func TestBarSecondsMustMatchTimeframe(t *testing.T) {
 	t.Setenv("DASHBOARD_PASSWORD", "x")
-	t.Setenv("DONCHIAN_TIMEFRAME", "30m")
-	t.Setenv("DONCHIAN_BAR_SECONDS", "3600")
+	t.Setenv("DONCHIAN_TIMEFRAME", "15m")
+	t.Setenv("DONCHIAN_BAR_SECONDS", "1800")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected BAR_SECONDS mismatch")
-	}
-}
-
-func TestPauseBarsMustEqualHours(t *testing.T) {
-	t.Setenv("DASHBOARD_PASSWORD", "x")
-	t.Setenv("DONCHIAN_TIMEFRAME", "30m")
-	t.Setenv("DONCHIAN_LS5_PAUSE_HOURS", "24")
-	t.Setenv("DONCHIAN_LS5_PAUSE_BARS", "24")
-	if _, err := Load(); err == nil {
-		t.Fatal("expected pause bars mismatch")
 	}
 }
 
@@ -92,24 +80,18 @@ func TestExitMMustBeBelowN(t *testing.T) {
 	}
 }
 
-func TestBaselineDisablesLiveLS5NotShadow(t *testing.T) {
-	t.Setenv("DONCHIAN_LIVE_PROFILE", "baseline")
-	cfg := loadWithPass(t)
-	if cfg.LS5Enabled || cfg.LiveConfig().LS5.Enabled {
-		t.Fatal("live ls5 should be off")
-	}
-	if !cfg.ShadowLS5Config().LS5.Enabled || cfg.BaselineConfig().LS5.Enabled {
-		t.Fatal("shadow books")
-	}
-	if cfg.PauseBars != 48 {
-		t.Fatalf("pause still calendar 24h: %d", cfg.PauseBars)
-	}
-}
-
 func TestRejectUnknownTimeframe(t *testing.T) {
 	t.Setenv("DASHBOARD_PASSWORD", "x")
 	t.Setenv("DONCHIAN_TIMEFRAME", "2h")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected reject 2h")
+	}
+}
+
+func TestRejectLS5Profile(t *testing.T) {
+	t.Setenv("DASHBOARD_PASSWORD", "x")
+	t.Setenv("DONCHIAN_LIVE_PROFILE", "ls5_cond_brk2.0")
+	if _, err := Load(); err == nil {
+		t.Fatal("ls5 profile should be rejected")
 	}
 }

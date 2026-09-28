@@ -26,7 +26,6 @@ type Config struct {
 	L1Address         string
 	Symbols           []string
 	ShadowBaseline    bool
-	ShadowLS5         bool
 	StartEquity       float64 // ignored for shadow; first live balance / later cash-flows are the source of truth
 	CashFlowMinUSD    float64
 	MaxNotionalUSD    float64
@@ -45,6 +44,7 @@ type Config struct {
 	CandleWarmup      time.Duration
 	ReconcileEvery    time.Duration
 	WatchdogEvery     time.Duration
+	LogDir            string
 
 	Tag         string
 	Resolution  string // Lighter candle interval: 1h, 30m, 15m, 5m
@@ -57,12 +57,13 @@ type Config struct {
 	MaxRiskUSD  float64
 	FeeRate     float64
 	LiveProfile string
-	LS5Enabled  bool
-	LossStreakN int
-	PauseHours  float64
-	PauseBars   int
-	ResumeATR   float64
 	Timeframe   time.Duration
+
+	MinBreakoutATR  float64
+	MaxVolRank      float64
+	VolRankBars     int
+	VolRankLookback int
+	ShadowBrkVol    bool // twin shadow with live entry filters (stored as shadow_ls5)
 }
 
 func Load() (*Config, error) {
@@ -73,9 +74,8 @@ func Load() (*Config, error) {
 		AccountIndex:      int64(getenvInt("LIGHTER_ACCOUNT_INDEX", 0)),
 		APIKeyIndex:       uint8(getenvInt("LIGHTER_API_KEY_INDEX", 4)),
 		L1Address:         strings.TrimSpace(os.Getenv("LIGHTER_L1_ADDRESS")),
-		Symbols:           splitCSV(getenv("SYMBOLS", "BTC,ETH")),
+		Symbols:           splitCSV(getenv("SYMBOLS", "BTC")),
 		ShadowBaseline:    getenvBool("SHADOW_BASELINE", true),
-		ShadowLS5:         getenvBool("SHADOW_LS5", true),
 		StartEquity:       getenvFloat("START_EQUITY", 0),
 		CashFlowMinUSD:    getenvFloat("CASH_FLOW_MIN_USD", 5),
 		MaxNotionalUSD:    getenvFloat("MAX_NOTIONAL_USD", 50000),
@@ -94,6 +94,7 @@ func Load() (*Config, error) {
 		CandleWarmup:      120 * 24 * time.Hour,
 		ReconcileEvery:    15 * time.Second,
 		WatchdogEvery:     20 * time.Second,
+		LogDir:            getenv("LOG_DIR", "./data/logs"),
 	}
 	if err := applyStrategyEnv(cfg); err != nil {
 		return nil, err

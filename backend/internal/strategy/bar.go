@@ -53,18 +53,15 @@ type Config struct {
 	RiskPct     float64
 	MaxRiskUSD  float64
 	FeeRate     float64
-	LS5         LS5Config
+
+	// Entry filters (0 = off). Applied on signal bar after N-channel break.
+	MinBreakoutATR  float64 // require close beyond channel by this many ATR
+	MaxVolRank      float64 // skip if vol_rank >= threshold; (0,1]
+	VolRankBars     int     // rolling vol window (~20h calendar)
+	VolRankLookback int     // percentile lookback (~42d calendar)
 }
 
-type LS5Config struct {
-	Enabled   bool
-	StreakN   int
-	PauseBars int
-	ResumeATR float64
-}
-
-// DefaultConfig is the research 1h fixture used by parity tests.
-// Live values come from DONCHIAN_* env (see config.applyStrategyEnv).
+// DefaultConfig is the research 1h fixture used by parity tests (baseline, no filters).
 func DefaultConfig() Config {
 	return Config{
 		ChannelN:    30,
@@ -74,12 +71,6 @@ func DefaultConfig() Config {
 		RiskPct:     1.0,
 		MaxRiskUSD:  1000,
 		FeeRate:     0, // Lighter Standard: 0 maker / 0 taker. Not Binance 5 bps.
-		LS5: LS5Config{
-			Enabled:   true,
-			StreakN:   5,
-			PauseBars: 24,
-			ResumeATR: 2.0,
-		},
 	}
 }
 
@@ -90,6 +81,12 @@ func Warmup(cfg Config) int {
 	}
 	if cfg.ATRPeriod > w {
 		w = cfg.ATRPeriod
+	}
+	if cfg.MaxVolRank > 0 && cfg.VolRankBars > 0 && cfg.VolRankLookback > 0 {
+		need := cfg.VolRankBars + cfg.VolRankLookback
+		if need > w {
+			w = need
+		}
 	}
 	return w
 }
