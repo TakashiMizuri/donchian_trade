@@ -106,7 +106,7 @@ func (e *Engine) stepBook(ctx context.Context, symbol, book string, bars []strat
 		if st.Position != nil && id > 0 {
 			st.Position.ID = int(id)
 		}
-	case strategy.ActionExitStop, strategy.ActionExitChannel:
+	case strategy.ActionExitStop, strategy.ActionExitChannel, strategy.ActionExitTimeStop:
 		if st.Position == nil {
 			return
 		}

@@ -24,14 +24,19 @@ type WS struct {
 	OnState    func(connected bool, err string)
 	mu         sync.Mutex
 	conn       *websocket.Conn
-	closed     map[string]int64 // symbol → last closed bar time
+	closed     map[string]int64      // symbol → last closed bar time
+	last       map[uint16]strategy.Bar // last live candle per market (for t-advance close)
 }
 
 func NewWS(url string, markets map[uint16]string, resolution string) *WS {
 	if resolution == "" {
 		resolution = "1h"
 	}
-	return &WS{URL: url, Markets: markets, Resolution: resolution, closed: map[string]int64{}}
+	return &WS{
+		URL: url, Markets: markets, Resolution: resolution,
+		closed: map[string]int64{},
+		last:   map[uint16]strategy.Bar{},
+	}
 }
 
 func (w *WS) Run(ctx context.Context) error {
@@ -119,8 +124,8 @@ func (w *WS) once(ctx context.Context) error {
 }
 
 type wsMsg struct {
-	Type    string      `json:"type"`
-	Channel string      `json:"channel"`
+	Type    string `json:"type"`
+	Channel string `json:"channel"`
 	Candles []CandleRaw `json:"candles"`
 	Error   json.RawMessage
 }
@@ -138,17 +143,37 @@ func (w *WS) handle(data []byte) {
 	}
 	marketID := parseMarketFromChannel(msg.Channel)
 	symbol := w.Markets[marketID]
-	// Rollover: two candles, first is the just-closed bar.
+
+	// Official rollover: two candles, first is the just-closed bar.
 	if len(msg.Candles) >= 2 {
 		closed := rawToBar(msg.Candles[0])
 		live := rawToBar(msg.Candles[1])
+		w.mu.Lock()
+		w.last[marketID] = live
+		w.mu.Unlock()
 		w.noteClosed(symbol, closed.Time)
 		if w.OnCandle != nil {
 			w.OnCandle(marketID, &closed, live)
 		}
 		return
 	}
+
 	live := rawToBar(msg.Candles[0])
+	w.mu.Lock()
+	prev, had := w.last[marketID]
+	w.last[marketID] = live
+	w.mu.Unlock()
+
+	// t advanced with a single candle (common when the first trade of the new bar
+	// arrives without a dual-candle payload). Emit cached previous bar as closed —
+	// same approach as Nautilus Lighter adapter.
+	if had && live.Time > prev.Time {
+		w.noteClosed(symbol, prev.Time)
+		if w.OnCandle != nil {
+			w.OnCandle(marketID, &prev, live)
+		}
+		return
+	}
 	if w.OnCandle != nil {
 		w.OnCandle(marketID, nil, live)
 	}

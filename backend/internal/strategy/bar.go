@@ -59,6 +59,10 @@ type Config struct {
 	MaxVolRank      float64 // skip if vol_rank >= threshold; (0,1]
 	VolRankBars     int     // rolling vol window (~20h calendar)
 	VolRankLookback int     // percentile lookback (~42d calendar)
+
+	// MaxBarsInTrade is the time-stop in bars (0 = off). Exit at next open when
+	// bars_held >= MaxBarsInTrade; outcome "time" (same as channel exit).
+	MaxBarsInTrade int
 }
 
 // DefaultConfig is the research 1h fixture used by parity tests (baseline, no filters).

@@ -329,7 +329,7 @@ func (e *Engine) weeklyReplay(ctx context.Context) {
 	}
 	e.mu.Unlock()
 	for _, sym := range syms {
-		_, final := strategy.Replay(copies[sym], e.liveCfg, start, 0, math.MaxInt64)
+		_, final := strategy.Replay(copies[sym], e.twinCfg, start, 0, math.MaxInt64)
 		inc, _, _, _ := e.Store.SumNetSymbol(ctx, telemetry.BookLS5, sym)
 		incEq := start + inc
 		diff := math.Abs(final.Equity - incEq)

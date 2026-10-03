@@ -146,6 +146,17 @@ func applyStrategyEnv(cfg *Config) error {
 	cfg.VolRankBars = volBars
 	cfg.VolRankLookback = volLookback
 
+	maxBars := getenvInt("DONCHIAN_MAX_BARS_IN_TRADE", 0)
+	if maxBars < 0 {
+		return fmt.Errorf("DONCHIAN_MAX_BARS_IN_TRADE must be ≥ 0")
+	}
+	shadowMaxBars := getenvInt("DONCHIAN_SHADOW_MAX_BARS_IN_TRADE", 0)
+	if shadowMaxBars < 0 {
+		return fmt.Errorf("DONCHIAN_SHADOW_MAX_BARS_IN_TRADE must be ≥ 0")
+	}
+	cfg.MaxBarsInTrade = maxBars
+	cfg.ShadowMaxBarsInTrade = shadowMaxBars
+
 	if raw := strings.TrimSpace(os.Getenv("DONCHIAN_SHADOW_BRK_VOL")); raw != "" {
 		cfg.ShadowBrkVol = getenvBool("DONCHIAN_SHADOW_BRK_VOL", false)
 	} else {
@@ -163,14 +174,23 @@ func autoTag(cfg *Config) string {
 	tag := fmt.Sprintf("%s_N%d_M%d_ATR%d_R%g", cfg.Resolution, cfg.ChannelN, cfg.ExitM, cfg.ATRPeriod, cfg.RiskPct)
 	switch {
 	case cfg.MinBreakoutATR > 0 && cfg.MaxVolRank > 0:
-		return tag + "_brk0.5_vol0.64"
+		tag += "_brk0.5_vol0.64"
 	case cfg.MinBreakoutATR > 0:
-		return tag + "_brk0.5"
+		tag += "_brk0.5"
 	case cfg.MaxVolRank > 0:
-		return tag + "_vol0.64"
+		tag += "_vol0.64"
 	default:
-		return tag + "+baseline"
+		tag += "+baseline"
 	}
+	if cfg.MaxBarsInTrade > 0 {
+		hours := float64(cfg.MaxBarsInTrade) * float64(cfg.BarSeconds) / 3600
+		if hours == float64(int(hours)) {
+			tag += fmt.Sprintf("_tstop%dh", int(hours))
+		} else {
+			tag += fmt.Sprintf("_tstop%db", cfg.MaxBarsInTrade)
+		}
+	}
+	return tag
 }
 
 func (c *Config) coreStrategy() strategy.Config {
@@ -190,25 +210,31 @@ func (c *Config) coreStrategy() strategy.Config {
 }
 
 func (c *Config) LiveConfig() strategy.Config {
-	return c.coreStrategy()
+	cfg := c.coreStrategy()
+	cfg.MaxBarsInTrade = c.MaxBarsInTrade
+	return cfg
 }
 
 // ShadowTwinConfig matches live entry filters (stored under profile shadow_ls5).
+// Time-stop is independent (usually 0 so twin matches research fills without tstop).
 func (c *Config) ShadowTwinConfig() strategy.Config {
-	return c.coreStrategy()
+	cfg := c.coreStrategy()
+	cfg.MaxBarsInTrade = c.ShadowMaxBarsInTrade
+	return cfg
 }
 
 func (c *Config) BaselineConfig() strategy.Config {
 	cfg := c.coreStrategy()
 	cfg.MinBreakoutATR = 0
 	cfg.MaxVolRank = 0
+	cfg.MaxBarsInTrade = 0
 	return cfg
 }
 
 func (c *Config) Fingerprint() string {
-	return fmt.Sprintf("tf=%s n=%d m=%d atr=%d x%.4g risk=%.4g cap=%.4g fee=%.6g brk=%.4g vol=%.4g vb=%d vl=%d",
+	return fmt.Sprintf("tf=%s n=%d m=%d atr=%d x%.4g risk=%.4g cap=%.4g fee=%.6g brk=%.4g vol=%.4g vb=%d vl=%d tstop=%d ststop=%d",
 		c.Resolution, c.ChannelN, c.ExitM, c.ATRPeriod, c.ATRStopMult, c.RiskPct, c.MaxRiskUSD, c.FeeRate,
-		c.MinBreakoutATR, c.MaxVolRank, c.VolRankBars, c.VolRankLookback)
+		c.MinBreakoutATR, c.MaxVolRank, c.VolRankBars, c.VolRankLookback, c.MaxBarsInTrade, c.ShadowMaxBarsInTrade)
 }
 
 func (c *Config) ProfileLog() []any {
@@ -227,6 +253,8 @@ func (c *Config) ProfileLog() []any {
 		"max_vol_rank", c.MaxVolRank,
 		"vol_rank_bars", c.VolRankBars,
 		"vol_rank_lookback", c.VolRankLookback,
+		"tstop_bars", c.MaxBarsInTrade,
+		"shadow_tstop_bars", c.ShadowMaxBarsInTrade,
 		"shadow_twin", c.ShadowBrkVol,
 		"shadow_baseline", c.ShadowBaseline,
 		"log_dir", c.LogDir,

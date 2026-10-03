@@ -43,6 +43,7 @@ type Engine struct {
 	wsErr       string
 	started     time.Time
 	liveCfg     strategy.Config
+	twinCfg     strategy.Config
 	baseCfg     strategy.Config
 	lastVerdict string
 
@@ -61,6 +62,7 @@ type Engine struct {
 
 func New(cfg *config.Config, st *store.Store, httpc *lighter.HTTPClient, signer *lighter.Signer, markets map[string]lighter.MarketMeta, ntf notify.Notifier, rg *risk.Guard, log *slog.Logger) *Engine {
 	live := cfg.LiveConfig()
+	twin := cfg.ShadowTwinConfig()
 	base := cfg.BaselineConfig()
 	idBy := map[string]uint16{}
 	symBy := map[uint16]string{}
@@ -83,7 +85,7 @@ func New(cfg *config.Config, st *store.Store, httpc *lighter.HTTPClient, signer 
 		entryIdx: map[string]int64{}, slIdx: map[string]int64{},
 		fundingBasis: map[string]float64{}, fundingLast: map[string]float64{},
 		alertAt: map[string]time.Time{},
-		started: time.Now(), liveCfg: live, baseCfg: base,
+		started: time.Now(), liveCfg: live, twinCfg: twin, baseCfg: base,
 	}
 }
 
@@ -346,9 +348,13 @@ func (e *Engine) HandleClosed(ctx context.Context, symbol string, bar strategy.B
 	switch act.Kind {
 	case strategy.ActionExitStop:
 		e.noteStopHit(ctx, symbol, &st, bars, act)
-	case strategy.ActionExitChannel:
+	case strategy.ActionExitChannel, strategy.ActionExitTimeStop:
+		label := "channel"
+		if act.Kind == strategy.ActionExitTimeStop {
+			label = "tstop"
+		}
 		if err := e.executeExit(ctx, symbol, &st, bars, act, false); err != nil {
-			e.alert(ctx, "error", "exit", symbol+" channel exit failed: "+err.Error())
+			e.alert(ctx, "error", "exit", symbol+" "+label+" exit failed: "+err.Error())
 		}
 	case strategy.ActionEnter:
 		if e.skipNewEntries() {
@@ -362,8 +368,8 @@ func (e *Engine) HandleClosed(ctx context.Context, symbol string, bar strategy.B
 		e.alert(ctx, "error", "db", "candle persist: "+err.Error())
 	}
 	if e.Cfg.ShadowBrkVol {
-		// Twin of live filters (brk/vol). Reuses shadow_ls5 book for §17 match.
-		e.stepBook(ctx, symbol, telemetry.BookLS5, bars, atr, i, nextOpen, nextTime, &ls5, e.liveCfg)
+		// Twin of live filters (brk/vol); tstop usually off. Book key shadow_ls5.
+		e.stepBook(ctx, symbol, telemetry.BookLS5, bars, atr, i, nextOpen, nextTime, &ls5, e.twinCfg)
 	}
 	if e.Cfg.ShadowBaseline {
 		e.stepBook(ctx, symbol, telemetry.BookBaseline, bars, atr, i, nextOpen, nextTime, &base, e.baseCfg)
@@ -879,6 +885,61 @@ func (e *Engine) PollClosedBars(ctx context.Context) {
 				continue
 			}
 			e.HandleClosed(ctx, sym, b, nextOpen)
+		}
+	}
+}
+
+// Offsets after each UTC bar boundary for aggressive REST candle fetch.
+// Complements WS: Lighter candle updates are trade-driven (~500ms batch), so quiet
+// markets can delay rollover notification by several seconds.
+var boundaryPollOffsets = []time.Duration{
+	200 * time.Millisecond,
+	500 * time.Millisecond,
+	1 * time.Second,
+	2 * time.Second,
+}
+
+// RunBoundaryPoll wakes near each bar close and calls PollClosedBars so closed
+// bars are picked up without waiting for the next trade-driven WS update or the
+// 15s reconcile ticker. HandleClosed is idempotent.
+func (e *Engine) RunBoundaryPoll(ctx context.Context) {
+	tf := e.Cfg.Timeframe
+	if tf <= 0 {
+		tf = time.Hour
+	}
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		now := time.Now().UTC()
+		boundary := now.Truncate(tf).Add(tf)
+		for _, off := range boundaryPollOffsets {
+			target := boundary.Add(off)
+			if delay := time.Until(target); delay > 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(delay):
+				}
+			} else if ctx.Err() != nil {
+				return
+			}
+			if e.Flog != nil {
+				e.Flog.Event("boundary_poll", map[string]any{
+					"offset_ms": off.Milliseconds(),
+					"boundary":  boundary.UTC().Format(time.RFC3339),
+				})
+			}
+			e.PollClosedBars(ctx)
+		}
+		// Align to the following boundary before the next offset burst.
+		next := time.Now().UTC().Truncate(tf).Add(tf)
+		if wait := time.Until(next); wait > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wait):
+			}
 		}
 	}
 }

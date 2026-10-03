@@ -26,10 +26,11 @@ func NewState(equity float64) State {
 type ActionKind string
 
 const (
-	ActionNone        ActionKind = "none"
-	ActionEnter       ActionKind = "enter"
-	ActionExitStop    ActionKind = "exit_stop"
-	ActionExitChannel ActionKind = "exit_channel"
+	ActionNone         ActionKind = "none"
+	ActionEnter        ActionKind = "enter"
+	ActionExitStop     ActionKind = "exit_stop"
+	ActionExitChannel  ActionKind = "exit_channel"
+	ActionExitTimeStop ActionKind = "exit_time_stop"
 )
 
 type Action struct {
@@ -106,6 +107,23 @@ func Decide(bars []Bar, atr []float64, i int, nextOpen float64, nextTime int64, 
 				SignalIdx:  i,
 				FillIdx:    i,
 				FillTime:   bars[i].Time,
+			}
+		}
+		// Time-stop before channel (research: SL first, then channel OR tstop → next open).
+		if cfg.MaxBarsInTrade > 0 {
+			barsHeld := i - pos.EntryIdx
+			if barsHeld >= cfg.MaxBarsInTrade {
+				return Action{
+					Kind:       ActionExitTimeStop,
+					Direction:  pos.Direction,
+					Price:      nextOpen,
+					Stop:       pos.Stop,
+					Risk:       pos.RiskDistance,
+					SignalTime: pos.SignalTime,
+					SignalIdx:  i,
+					FillIdx:    i + 1,
+					FillTime:   nextTime,
+				}
 			}
 		}
 		from := i - cfg.ExitM
@@ -247,13 +265,13 @@ func Apply(st *State, cfg Config, bars []Bar, act Action) *Trade {
 		}
 		st.NextID++
 		return nil
-	case ActionExitStop, ActionExitChannel:
+	case ActionExitStop, ActionExitChannel, ActionExitTimeStop:
 		if st.Position == nil {
 			return nil
 		}
 		pos := st.Position
 		outcome := OutcomeSL
-		if act.Kind == ActionExitChannel {
+		if act.Kind == ActionExitChannel || act.Kind == ActionExitTimeStop {
 			outcome = OutcomeTime
 		}
 		riskUSD := RiskUSD(st.Equity, cfg.RiskPct, cfg.MaxRiskUSD)
@@ -309,7 +327,7 @@ func Replay(bars []Bar, cfg Config, startEquity float64, evalFrom, evalTo int64)
 		nextTime := bars[i+1].Time
 		if st.Position != nil {
 			act := Decide(bars, atr, i, nextOpen, nextTime, st, cfg)
-			if act.Kind == ActionExitStop || act.Kind == ActionExitChannel {
+			if act.Kind == ActionExitStop || act.Kind == ActionExitChannel || act.Kind == ActionExitTimeStop {
 				if t := Apply(&st, cfg, bars, act); t != nil {
 					trades = append(trades, *t)
 				}

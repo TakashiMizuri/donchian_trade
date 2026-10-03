@@ -121,6 +121,76 @@ func TestLongEntryStopOnNextOpen(t *testing.T) {
 	almostEqual(t, "stop", act.Stop, wantStop, 1e-9)
 }
 
+func TestTimeStopExitsAtNextOpen(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ChannelN = 3
+	cfg.ExitM = 2
+	cfg.ATRPeriod = 2
+	cfg.MaxBarsInTrade = 2
+	// Wide M-channel so channel exit does not fire; tstop should.
+	bars := []Bar{
+		{Time: 0, Open: 100, High: 101, Low: 99, Close: 100},
+		{Time: 3600, Open: 100, High: 101, Low: 99, Close: 100},
+		{Time: 7200, Open: 100, High: 101, Low: 99, Close: 100},
+		{Time: 10800, Open: 100, High: 120, Low: 100, Close: 119}, // signal
+		{Time: 14400, Open: 119, High: 121, Low: 118, Close: 120}, // entry idx=4
+		{Time: 18000, Open: 120, High: 122, Low: 119, Close: 121}, // held 1
+		{Time: 21600, Open: 121, High: 123, Low: 120, Close: 122}, // held 2 → tstop
+		{Time: 25200, Open: 122.5, High: 124, Low: 122, Close: 123}, // fill
+	}
+	atr := ATR(bars, cfg.ATRPeriod)
+	st := NewState(10_000)
+	enter := Decide(bars, atr, 3, bars[4].Open, bars[4].Time, st, cfg)
+	if enter.Kind != ActionEnter {
+		t.Fatalf("enter: %+v", enter)
+	}
+	Apply(&st, cfg, bars, enter)
+	if st.Position == nil || st.Position.EntryIdx != 4 {
+		t.Fatalf("position %+v", st.Position)
+	}
+	// At i=5 bars_held=1 < 2
+	act5 := Decide(bars, atr, 5, bars[6].Open, bars[6].Time, st, cfg)
+	if act5.Kind != ActionNone {
+		t.Fatalf("early exit %+v", act5)
+	}
+	// At i=6 bars_held=2 → tstop
+	act6 := Decide(bars, atr, 6, bars[7].Open, bars[7].Time, st, cfg)
+	if act6.Kind != ActionExitTimeStop {
+		t.Fatalf("want tstop, got %+v", act6)
+	}
+	almostEqual(t, "tstop px", act6.Price, bars[7].Open, 1e-9)
+	tr := Apply(&st, cfg, bars, act6)
+	if tr == nil || tr.Outcome != OutcomeTime {
+		t.Fatalf("trade %+v", tr)
+	}
+}
+
+func TestStopPriorityOverTimeStop(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ChannelN = 3
+	cfg.ExitM = 2
+	cfg.ATRPeriod = 2
+	cfg.MaxBarsInTrade = 1
+	bars := []Bar{
+		{Time: 0, Open: 100, High: 101, Low: 99, Close: 100},
+		{Time: 3600, Open: 100, High: 101, Low: 99, Close: 100},
+		{Time: 7200, Open: 100, High: 101, Low: 99, Close: 100},
+		{Time: 10800, Open: 100, High: 120, Low: 100, Close: 119},
+		{Time: 14400, Open: 119, High: 121, Low: 118, Close: 120}, // entry
+		// SL and tstop both eligible (held>=1); SL wins.
+		{Time: 18000, Open: 120, High: 121, Low: 50, Close: 60},
+		{Time: 21600, Open: 60, High: 61, Low: 59, Close: 60},
+	}
+	trades, _ := Replay(bars, cfg, 10_000, 0, math.MaxInt64)
+	if len(trades) == 0 {
+		t.Fatal("expected a trade")
+	}
+	last := trades[len(trades)-1]
+	if last.Outcome != OutcomeSL {
+		t.Fatalf("expected sl over tstop, got %s", last.Outcome)
+	}
+}
+
 func TestStopPriorityOverChannel(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ChannelN = 3

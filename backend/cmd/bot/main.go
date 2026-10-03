@@ -112,6 +112,7 @@ func main() {
 			log.Error("ws", "err", err)
 		}
 	}()
+	go eng.RunBoundaryPoll(ctx)
 	go func() {
 		t := time.NewTicker(cfg.ReconcileEvery)
 		defer t.Stop()

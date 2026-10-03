@@ -64,6 +64,9 @@ type Config struct {
 	VolRankBars     int
 	VolRankLookback int
 	ShadowBrkVol    bool // twin shadow with live entry filters (stored as shadow_ls5)
+
+	MaxBarsInTrade       int // live time-stop in bars (0 = off)
+	ShadowMaxBarsInTrade int // twin shadow time-stop (0 = off; startpack: match without tstop)
 }
 
 func Load() (*Config, error) {

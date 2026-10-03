@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +40,42 @@ func TestDefaultEnvIs15mBrkVol(t *testing.T) {
 	base := cfg.BaselineConfig()
 	if live.MinBreakoutATR != 0.5 || base.MinBreakoutATR != 0 {
 		t.Fatalf("filters live=%+v base=%+v", live, base)
+	}
+	if live.MaxBarsInTrade != 0 || base.MaxBarsInTrade != 0 {
+		t.Fatalf("default tstop should be off, live=%d base=%d", live.MaxBarsInTrade, base.MaxBarsInTrade)
+	}
+}
+
+func TestFiveMTstop20hPreset(t *testing.T) {
+	t.Setenv("DONCHIAN_TIMEFRAME", "5m")
+	t.Setenv("DONCHIAN_BAR_SECONDS", "300")
+	t.Setenv("DONCHIAN_CHANNEL_N", "360")
+	t.Setenv("DONCHIAN_EXIT_M", "180")
+	t.Setenv("DONCHIAN_ATR_PERIOD", "240")
+	t.Setenv("DONCHIAN_LIVE_PROFILE", "brk0.5+vol_rank")
+	t.Setenv("DONCHIAN_MIN_BREAKOUT_ATR", "0.5")
+	t.Setenv("DONCHIAN_MAX_VOL_RANK", "0.64")
+	t.Setenv("DONCHIAN_VOL_RANK_BARS", "240")
+	t.Setenv("DONCHIAN_VOL_RANK_LOOKBACK", "12000")
+	t.Setenv("DONCHIAN_MAX_BARS_IN_TRADE", "240")
+	t.Setenv("DONCHIAN_SHADOW_MAX_BARS_IN_TRADE", "0")
+	cfg := loadWithPass(t)
+	if cfg.Resolution != "5m" || cfg.BarSeconds != 300 {
+		t.Fatalf("tf %s %d", cfg.Resolution, cfg.BarSeconds)
+	}
+	if cfg.ChannelN != 360 || cfg.ExitM != 180 || cfg.ATRPeriod != 240 {
+		t.Fatalf("n/m/atr %d/%d/%d", cfg.ChannelN, cfg.ExitM, cfg.ATRPeriod)
+	}
+	if cfg.VolRankBars != 240 || cfg.VolRankLookback != 12000 {
+		t.Fatalf("vol windows %d/%d", cfg.VolRankBars, cfg.VolRankLookback)
+	}
+	live := cfg.LiveConfig()
+	twin := cfg.ShadowTwinConfig()
+	if live.MaxBarsInTrade != 240 || twin.MaxBarsInTrade != 0 {
+		t.Fatalf("tstop live=%d twin=%d", live.MaxBarsInTrade, twin.MaxBarsInTrade)
+	}
+	if !strings.Contains(cfg.Tag, "tstop20h") && !strings.Contains(cfg.Fingerprint(), "tstop=240") {
+		t.Fatalf("tag/fp missing tstop: tag=%s fp=%s", cfg.Tag, cfg.Fingerprint())
 	}
 }
 
