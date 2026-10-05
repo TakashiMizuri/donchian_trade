@@ -91,8 +91,18 @@ func TestCloseDustCash(t *testing.T) {
 	if closeDustCash(-200, 0, 30) {
 		t.Fatal("real withdraw")
 	}
-	if closeDustCash(-8, 10, 30) {
-		t.Fatal("explained not large enough")
+	if closeDustCash(-8, -10, 30) {
+		t.Fatal("same-sign residual is not out-of-phase dust")
+	}
+	if closeDustCash(50, -10, 30) {
+		t.Fatal("residual larger than trade PnL is a real transfer")
+	}
+	// Out-of-phase journal: residual ≈ trade PnL looks like a false deposit.
+	if !closeDustCash(3.93, -3.93, 30) {
+		t.Fatal("double-count deposit")
+	}
+	if !closeDustCash(1.64, -3.977, 30) {
+		t.Fatal("partial close dust with explained ~2.4x")
 	}
 }
 

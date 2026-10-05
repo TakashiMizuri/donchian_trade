@@ -52,34 +52,52 @@ func Key(symbol, direction string, signalTime int64) TradeKey {
 }
 
 func Match(shadow, live []ClosedTrade) (matched, liveOnly, shadowOnly []TradeKey, rate, dice float64) {
+	openS := map[TradeKey]struct{}{}
+	openL := map[TradeKey]struct{}{}
 	S := map[TradeKey]struct{}{}
 	L := map[TradeKey]struct{}{}
 	for _, t := range shadow {
+		if t.Open {
+			openS[t.Key] = struct{}{}
+			continue
+		}
 		S[t.Key] = struct{}{}
 	}
 	for _, t := range live {
+		if t.Open {
+			openL[t.Key] = struct{}{}
+			continue
+		}
 		L[t.Key] = struct{}{}
 	}
-	union := map[TradeKey]struct{}{}
+	// Exchange SL closes live before bar-SL closes twin (and vice versa). While the
+	// other book still holds the same key, the mismatch is pending — not a port bug.
 	for k := range S {
-		union[k] = struct{}{}
 		if _, ok := L[k]; ok {
 			matched = append(matched, k)
-		} else {
-			shadowOnly = append(shadowOnly, k)
+			continue
 		}
+		if _, pending := openL[k]; pending {
+			continue
+		}
+		shadowOnly = append(shadowOnly, k)
 	}
 	for k := range L {
-		union[k] = struct{}{}
-		if _, ok := S[k]; !ok {
-			liveOnly = append(liveOnly, k)
+		if _, ok := S[k]; ok {
+			continue
 		}
+		if _, pending := openS[k]; pending {
+			continue
+		}
+		liveOnly = append(liveOnly, k)
 	}
-	if len(union) > 0 {
-		rate = float64(len(matched)) / float64(len(union))
+	nUnion := len(matched) + len(liveOnly) + len(shadowOnly)
+	if nUnion > 0 {
+		rate = float64(len(matched)) / float64(nUnion)
 	}
-	if len(S)+len(L) > 0 {
-		dice = 2 * float64(len(matched)) / float64(len(S)+len(L))
+	nClosed := len(S) + len(L)
+	if nClosed > 0 {
+		dice = 2 * float64(len(matched)) / float64(nClosed)
 	}
 	return
 }
@@ -145,16 +163,19 @@ func PnLRatio(liveNetXF, shadowNet, startEquity, typicalRisk float64) (ratio flo
 }
 
 func StatusA(matchRate float64, nUnion, liveOnly7d, shadowOnly7d int) string {
+	mism := liveOnly7d + shadowOnly7d
 	if nUnion < 10 {
-		if liveOnly7d+shadowOnly7d >= 2 {
+		if mism >= 2 {
 			return StatusYellow
 		}
 		return StatusNA
 	}
-	if matchRate < 0.95 {
+	// One settled mismatch in a small sample pulls match_rate under 0.95 (e.g. 10/11).
+	// Startpack: a single explained live_only/week is INVESTIGATE, not STOP.
+	if matchRate < 0.95 && mism >= 2 {
 		return StatusRed
 	}
-	if matchRate < 0.99 || liveOnly7d >= 2 || shadowOnly7d >= 2 {
+	if matchRate < 0.95 || matchRate < 0.99 || mism >= 2 {
 		return StatusYellow
 	}
 	return StatusGreen

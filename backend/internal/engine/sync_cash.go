@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"donchian.trade/bot/internal/exchange/lighter"
@@ -97,7 +98,7 @@ func (e *Engine) syncCash(ctx context.Context, acc *lighter.Account) {
 		return
 	}
 	if !watch.FundingTracked {
-		e.reverseCloseDustOnce(ctx, acc, eq)
+		e.scrubCloseDustCash(ctx, acc, eq)
 		watch.FundingTracked = true
 		watch.LastWallet = wallet
 		watch.LastRealized = realized
@@ -107,6 +108,7 @@ func (e *Engine) syncCash(ctx context.Context, acc *lighter.Account) {
 		_ = e.Store.SaveCashWatch(ctx, watch)
 		return
 	}
+	e.scrubCloseDustCash(ctx, acc, eq)
 	flow := ResidualCash(watch.LastWallet, wallet, watch.LastRealizedXF, realizedXF, watch.LastOpenFees, openFees, watch.LastFunding, fundingAll)
 	explained := (wallet - watch.LastWallet) - flow
 	watch.LastWallet = wallet
@@ -118,13 +120,25 @@ func (e *Engine) syncCash(ctx context.Context, acc *lighter.Account) {
 	if abs64(flow) < cashThreshold(minUSD, eq) {
 		return
 	}
+	maxAbs := cashThreshold(minUSD, eq) * 6
+	if closeDustCash(flow, explained, maxAbs) {
+		e.Log.Info("cash residual ignored as close dust", "flow", flow, "explained", explained)
+		return
+	}
 	e.recordCash(ctx, flow, classifyCash(flow), eq, wallet, explained, "auto-detected: live wallet move not explained by trading")
 }
 
-func (e *Engine) reverseCloseDustOnce(ctx context.Context, acc *lighter.Account, eq float64) {
+// scrubCloseDustCash reverses prior auto "deposits/withdrawals" that were really
+// close residuals (wallet vs journal out of phase). Idempotent via reverse note.
+func (e *Engine) scrubCloseDustCash(ctx context.Context, acc *lighter.Account, eq float64) {
 	flows, err := e.Store.ListCashFlows(ctx, 200)
 	if err != nil {
 		return
+	}
+	for _, f := range flows {
+		if strings.Contains(f.Note, "close residual") || strings.HasPrefix(f.Note, "reverse:") {
+			return
+		}
 	}
 	maxAbs := cashThreshold(e.Cfg.CashFlowMinUSD, eq) * 6
 	sum := 0.0

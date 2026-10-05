@@ -48,5 +48,15 @@ func closeDustCash(amount, explained, maxAbs float64) bool {
 	if a < 1e-9 || a >= maxAbs {
 		return false
 	}
-	return math.Abs(explained) >= 5*a
+	// Tiny residual next to a much larger trade PnL.
+	if math.Abs(explained) >= 5*a {
+		return true
+	}
+	tol := math.Max(0.05, 0.02*a)
+	// Double-count / out-of-phase: residual ≈ ±trade PnL, or residual is a fraction of
+	// the same-tick trade move with opposite sign (false deposit of a loss size).
+	if explained != 0 && amount*explained < 0 && a <= math.Abs(explained)+tol {
+		return true
+	}
+	return math.Abs(math.Abs(explained)-a) <= tol
 }

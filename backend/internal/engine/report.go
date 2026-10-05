@@ -168,33 +168,25 @@ func (e *Engine) snapshotBooks(ctx context.Context, reason string) {
 	_ = e.Store.InsertCurve(ctx, p)
 	_ = e.appendCurveCSV(p)
 	e.persistMismatches(ctx)
-	e.noteVerdict(ctx, rep)
+	// Display/CSV get the live verdict; kill latch only runs on the daily report (§17.12).
 	_ = avail
 }
 
 func (e *Engine) persistMismatches(ctx context.Context) {
 	liveRows, _ := e.Store.TradesByProfile(ctx, telemetry.BookLive)
 	ls5Rows, _ := e.Store.TradesByProfile(ctx, telemetry.BookLS5)
-	liveKeys := map[telemetry.TradeKey]struct{}{}
-	shKeys := map[telemetry.TradeKey]struct{}{}
-	for _, t := range e.toClosed(liveRows, telemetry.BookLive) {
-		liveKeys[t.Key] = struct{}{}
-	}
-	for _, t := range e.toClosed(ls5Rows, telemetry.BookLS5) {
-		shKeys[t.Key] = struct{}{}
-	}
-	for k := range liveKeys {
-		if _, ok := shKeys[k]; !ok {
-			if has, _ := e.Store.HasMismatch(ctx, "live_only", k.Symbol, k.Direction, k.SignalTime); !has {
-				_ = e.Store.InsertMismatch(ctx, "live_only", k.Symbol, k.Direction, k.SignalTime, "live entry without twin shadow")
-			}
+	_, liveOnly, shadowOnly, _, _ := telemetry.Match(
+		e.toClosed(ls5Rows, telemetry.BookLS5),
+		e.toClosed(liveRows, telemetry.BookLive),
+	)
+	for _, k := range liveOnly {
+		if has, _ := e.Store.HasMismatch(ctx, "live_only", k.Symbol, k.Direction, k.SignalTime); !has {
+			_ = e.Store.InsertMismatch(ctx, "live_only", k.Symbol, k.Direction, k.SignalTime, "live entry without twin shadow")
 		}
 	}
-	for k := range shKeys {
-		if _, ok := liveKeys[k]; !ok {
-			if has, _ := e.Store.HasMismatch(ctx, "shadow_only", k.Symbol, k.Direction, k.SignalTime); !has {
-				_ = e.Store.InsertMismatch(ctx, "shadow_only", k.Symbol, k.Direction, k.SignalTime, "twin shadow entry without live")
-			}
+	for _, k := range shadowOnly {
+		if has, _ := e.Store.HasMismatch(ctx, "shadow_only", k.Symbol, k.Direction, k.SignalTime); !has {
+			_ = e.Store.InsertMismatch(ctx, "shadow_only", k.Symbol, k.Direction, k.SignalTime, "twin shadow entry without live")
 		}
 	}
 }
@@ -273,6 +265,7 @@ func (e *Engine) WriteDailyReport(ctx context.Context, date string) {
 	_ = os.MkdirAll(dir, 0o755)
 	_ = os.WriteFile(filepath.Join(dir, date+".txt"), []byte(body), 0o644)
 	_ = e.Store.InsertEvent(ctx, "info", "daily", "суточный отчёт "+date+" · "+rep.Verdict, nil)
+	e.noteVerdict(ctx, rep)
 	e.Notify.Report(ctx, notify.ReportMail{
 		Date:    date,
 		Caption: "Суточный отчёт " + date + " UTC",

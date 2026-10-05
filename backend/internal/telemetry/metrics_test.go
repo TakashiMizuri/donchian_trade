@@ -36,6 +36,35 @@ func TestMatchRate(t *testing.T) {
 	}
 }
 
+func TestMatchPendingOpenNotMismatch(t *testing.T) {
+	// Live already SL'd; twin still open on same key — pending, not live_only.
+	sh := []ClosedTrade{
+		{Key: Key("ETH", "BUY", 10), Open: true},
+		{Key: Key("BTC", "BUY", 1)},
+	}
+	lv := []ClosedTrade{
+		{Key: Key("ETH", "BUY", 10)},
+		{Key: Key("BTC", "BUY", 1)},
+	}
+	m, lo, so, rate, _ := Match(sh, lv)
+	if len(m) != 1 || len(lo) != 0 || len(so) != 0 {
+		t.Fatalf("m=%d lo=%d so=%d", len(m), len(lo), len(so))
+	}
+	if rate != 1 {
+		t.Fatalf("rate %v", rate)
+	}
+}
+
+func TestStatusASingleMismatchYellow(t *testing.T) {
+	// 10/11 ≈ 0.909 would have been red; one mismatch → yellow.
+	if g := StatusA(10.0/11.0, 11, 1, 0); g != StatusYellow {
+		t.Fatalf("got %s", g)
+	}
+	if g := StatusA(9.0/11.0, 11, 2, 0); g != StatusRed {
+		t.Fatalf("got %s want red", g)
+	}
+}
+
 func TestPnLRatioNA(t *testing.T) {
 	_, ok := PnLRatio(10, 0.1, 10000, 100)
 	if ok {
