@@ -23,23 +23,28 @@
 
 Кешируем последний live-бар по `market_id`. Если приходит **одна** свеча с `t` больше предыдущего — эмитим закешированный бар как **closed**, новый как live. Dual-candle rollover по-прежнему поддерживается. `HandleClosed` идемпотентен (повтор того же `bar.Time` no-op).
 
-### B. Boundary REST poll
+### B. Boundary REST poll-until-seen
 
 Файл: `backend/internal/engine/engine.go` → `RunBoundaryPoll`  
 Старт: `backend/cmd/bot/main.go`
 
-После каждой UTC-границы TF дергаем `PollClosedBars` на смещениях:
+После каждой UTC-границы TF:
 
-- +200 ms  
-- +500 ms  
-- +1 s  
-- +2 s  
+1. Сразу начинаем опрос REST.
+2. Повторяем **каждые 200 ms**, пока у **всех** символов не появится закрытый бар (`lastBar >= expected`), либо до таймаута **5 s**.
+3. Если WS успел раньше — `all_seen=true` на первой же попытке, опрос останавливается (`HandleClosed` идемпотентен).
 
-Не ждём trade-driven WS. В jsonl пишется `kind=boundary_poll`. Старый тикер reconcile **15 s** остаётся страховкой + account sync.
+В jsonl:
+
+- `kind=boundary_poll` — `attempt`, `offset_ms`, `all_seen`
+- `kind=bar_closed` / `entry_intent` — поле `source`: `ws` | `boundary` | `reconcile`
+
+Старый тикер reconcile **15 s** остаётся страховкой + account sync (не основной путь детекта).
 
 ## Ожидание
 
-- Типичный `detect_lag_ms`: с **4–8 s** → часто **&lt;1–2 s** (зависит от того, когда REST отдаст закрытый бар / когда придёт первый trade нового бара).
+- `detect_lag_ms` стабильно в зоне **&lt;1–2 s**, когда REST уже отдаёт закрытый бар; без провала на ~8 s из-за 15s ticker.
+- Если биржа отдаёт свечу поздно — лаг ≈ задержка API (не больше timeout 5 s на этом пути).
 - Полный ноль не обещаем: сеть, REST RTT, impact на IOC остаются.
 - Signing/IOC path не меняли — он уже был миллисекундный.
 
@@ -48,12 +53,13 @@
 ```bash
 # после деплоя, на закрытии бара с входом:
 grep '"kind":"entry_intent"' /data/logs/bot-*.jsonl | tail
-# смотреть detect_lag_ms
+# смотреть detect_lag_ms и source
 
+grep '"kind":"bar_closed"' /data/logs/bot-*.jsonl | tail
 grep '"kind":"boundary_poll"' /data/logs/bot-*.jsonl | tail
 ```
 
-Сравнить median/p90 `detect_lag_ms` и `entry_slip_bps` с дампом `prod_15m_brk_vol` (до патча).
+Сравнить median/p90 `detect_lag_ms` с дампом `prod_5m_tstop20` (до poll-until-seen: часто ~8 s).
 
 ## Вне скоупа
 

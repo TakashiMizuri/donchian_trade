@@ -295,11 +295,14 @@ func (e *Engine) OnLiveCandle(marketID uint16, closed *strategy.Bar, live strate
 	if closed != nil {
 		// Don't block the WS read loop on entry/WaitFill — BTC must not stall ETH.
 		bar, open := *closed, live.Open
-		go e.HandleClosed(context.Background(), sym, bar, open)
+		go e.HandleClosed(context.Background(), sym, bar, open, "ws")
 	}
 }
 
-func (e *Engine) HandleClosed(ctx context.Context, symbol string, bar strategy.Bar, nextOpen float64) {
+func (e *Engine) HandleClosed(ctx context.Context, symbol string, bar strategy.Bar, nextOpen float64, source string) {
+	if source == "" {
+		source = "ws"
+	}
 	e.mu.Lock()
 	if e.busy[symbol] {
 		e.mu.Unlock()
@@ -327,6 +330,12 @@ func (e *Engine) HandleClosed(ctx context.Context, symbol string, bar strategy.B
 	}
 	barCloseWall := time.Unix(bar.Time, 0).UTC().Add(tf)
 	detectLagMs := time.Since(barCloseWall).Milliseconds()
+	if e.Flog != nil {
+		e.Flog.Event("bar_closed", map[string]any{
+			"symbol": symbol, "bar_time": bar.Time,
+			"detect_lag_ms": detectLagMs, "source": source,
+		})
+	}
 
 	// Hot path: update memory + decide + live order before SQLite shadows/persist.
 	e.mu.Lock()
@@ -359,7 +368,7 @@ func (e *Engine) HandleClosed(ctx context.Context, symbol string, bar strategy.B
 	case strategy.ActionEnter:
 		if e.skipNewEntries() {
 			e.alert(ctx, "warn", "verdict", symbol+" skip entry: verdict STOP (shadow continues)")
-		} else if err := e.executeEntry(ctx, symbol, &st, bars, act, barCloseWall, detectLagMs); err != nil {
+		} else if err := e.executeEntry(ctx, symbol, &st, bars, act, barCloseWall, detectLagMs, source); err != nil {
 			e.alert(ctx, "error", "entry", symbol+" entry failed: "+err.Error())
 		}
 	}
@@ -431,7 +440,7 @@ func (e *Engine) persistSymbol(ctx context.Context, symbol string, st strategy.S
 	_ = e.Store.SaveSymbolState(ctx, symbol, sst)
 }
 
-func (e *Engine) executeEntry(ctx context.Context, symbol string, st *strategy.State, bars []strategy.Bar, act strategy.Action, barCloseWall time.Time, detectLagMs int64) error {
+func (e *Engine) executeEntry(ctx context.Context, symbol string, st *strategy.State, bars []strategy.Bar, act strategy.Action, barCloseWall time.Time, detectLagMs int64, source string) error {
 	if ok, why := e.Risk.AllowEntry(0, st.Equity); !ok {
 		e.alert(ctx, "warn", "risk", symbol+" skip entry: "+why)
 		return nil
@@ -482,7 +491,7 @@ func (e *Engine) executeEntry(ctx context.Context, symbol string, st *strategy.S
 		e.Flog.Event("entry_intent", map[string]any{
 			"symbol": symbol, "direction": act.Direction,
 			"qty": qty, "stop": act.Stop, "risk": act.Risk, "ref_px": act.Price,
-			"detect_lag_ms": detectLagMs,
+			"detect_lag_ms": detectLagMs, "source": source,
 		})
 	}
 	e.txMu.Lock()
@@ -496,7 +505,7 @@ func (e *Engine) executeEntry(ctx context.Context, symbol string, st *strategy.S
 	if e.Flog != nil {
 		e.Flog.Event("entry_sent", map[string]any{
 			"symbol": symbol, "direction": act.Direction, "client_idx": clientIdx,
-			"lag_ms": lagMs, "tx_hash": res.TxHash,
+			"lag_ms": lagMs, "tx_hash": res.TxHash, "source": source,
 		})
 	}
 	e.setOrderIdx(symbol, clientIdx, 0)
@@ -538,14 +547,15 @@ func (e *Engine) executeEntry(ctx context.Context, symbol string, st *strategy.S
 
 	e.Log.Info("entry lag",
 		"symbol", symbol,
+		"source", source,
 		"detect_lag_ms", detectLagMs,
 		"lag_ms", lagMs,
 		"bar_close_wall", barCloseWall.UTC().Format(time.RFC3339),
 		"send_at", sendAt.UTC().Format(time.RFC3339Nano),
 		"hash", res.TxHash,
 	)
-	e.alert(ctx, "info", "entry", fmt.Sprintf("%s %s qty=%.6f px=%.2f stop=%.2f lag_ms=%d detect_lag_ms=%d hash=%s",
-		symbol, act.Direction, qty, act.Price, act.Stop, lagMs, detectLagMs, res.TxHash))
+	e.alert(ctx, "info", "entry", fmt.Sprintf("%s %s qty=%.6f px=%.2f stop=%.2f source=%s lag_ms=%d detect_lag_ms=%d hash=%s",
+		symbol, act.Direction, qty, act.Price, act.Stop, source, lagMs, detectLagMs, res.TxHash))
 
 	txHash := res.TxHash
 	go e.recordEntryFill(context.Background(), symbol, id, clientIdx, txHash, act.Price, act.Direction)
@@ -842,6 +852,13 @@ func (e *Engine) Resume(ctx context.Context) {
 }
 
 func (e *Engine) PollClosedBars(ctx context.Context) {
+	e.pollClosedBars(ctx, 0, "reconcile")
+}
+
+// pollClosedBars fetches recent candles and feeds closed bars into HandleClosed.
+// If expectedClosed > 0, returns whether every symbol has already processed that bar
+// (via WS or a prior poll). HandleClosed is idempotent.
+func (e *Engine) pollClosedBars(ctx context.Context, expectedClosed int64, source string) bool {
 	tf := e.Cfg.Timeframe
 	if tf <= 0 {
 		tf = time.Hour
@@ -884,24 +901,36 @@ func (e *Engine) PollClosedBars(ctx context.Context) {
 			if b.Time >= cutoff {
 				continue
 			}
-			e.HandleClosed(ctx, sym, b, nextOpen)
+			e.HandleClosed(ctx, sym, b, nextOpen, source)
 		}
 	}
+	if expectedClosed <= 0 {
+		return true
+	}
+	return e.haveClosedBar(expectedClosed)
 }
 
-// Offsets after each UTC bar boundary for aggressive REST candle fetch.
-// Complements WS: Lighter candle updates are trade-driven (~500ms batch), so quiet
-// markets can delay rollover notification by several seconds.
-var boundaryPollOffsets = []time.Duration{
-	200 * time.Millisecond,
-	500 * time.Millisecond,
-	1 * time.Second,
-	2 * time.Second,
+func (e *Engine) haveClosedBar(barTime int64) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, sym := range e.Cfg.Symbols {
+		if e.lastBar[sym] < barTime {
+			return false
+		}
+	}
+	return len(e.Cfg.Symbols) > 0
 }
 
-// RunBoundaryPoll wakes near each bar close and calls PollClosedBars so closed
-// bars are picked up without waiting for the next trade-driven WS update or the
-// 15s reconcile ticker. HandleClosed is idempotent.
+// After each UTC bar boundary, poll REST every 200ms until the closed bar is seen
+// (or timeout). Complements trade-driven WS so quiet markets do not fall through
+// to the 15s reconcile ticker (~8s median lag).
+const (
+	boundaryPollInterval = 200 * time.Millisecond
+	boundaryPollTimeout  = 5 * time.Second
+)
+
+// RunBoundaryPoll waits for each bar boundary, then polls until the prior bar is
+// ingested for all symbols. HandleClosed is idempotent if WS wins the race.
 func (e *Engine) RunBoundaryPoll(ctx context.Context) {
 	tf := e.Cfg.Timeframe
 	if tf <= 0 {
@@ -913,26 +942,42 @@ func (e *Engine) RunBoundaryPoll(ctx context.Context) {
 		}
 		now := time.Now().UTC()
 		boundary := now.Truncate(tf).Add(tf)
-		for _, off := range boundaryPollOffsets {
-			target := boundary.Add(off)
-			if delay := time.Until(target); delay > 0 {
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(delay):
-				}
-			} else if ctx.Err() != nil {
+		if wait := time.Until(boundary); wait > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wait):
+			}
+		}
+		expectedClosed := boundary.Add(-tf).Unix()
+		deadline := boundary.Add(boundaryPollTimeout)
+		attempt := 0
+		for {
+			if ctx.Err() != nil {
 				return
 			}
+			attempt++
+			offsetMs := time.Since(boundary).Milliseconds()
+			allSeen := e.pollClosedBars(ctx, expectedClosed, "boundary")
 			if e.Flog != nil {
 				e.Flog.Event("boundary_poll", map[string]any{
-					"offset_ms": off.Milliseconds(),
-					"boundary":  boundary.UTC().Format(time.RFC3339),
+					"attempt":         attempt,
+					"offset_ms":       offsetMs,
+					"boundary":        boundary.UTC().Format(time.RFC3339),
+					"expected_closed": expectedClosed,
+					"all_seen":        allSeen,
 				})
 			}
-			e.PollClosedBars(ctx)
+			if allSeen || time.Now().UTC().After(deadline) {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(boundaryPollInterval):
+			}
 		}
-		// Align to the following boundary before the next offset burst.
+		// Align to the following boundary.
 		next := time.Now().UTC().Truncate(tf).Add(tf)
 		if wait := time.Until(next); wait > 0 {
 			select {
