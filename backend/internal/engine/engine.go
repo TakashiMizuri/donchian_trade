@@ -151,10 +151,21 @@ func (e *Engine) Bootstrap(ctx context.Context) error {
 	if err := e.lockStrategyFingerprint(ctx); err != nil {
 		return err
 	}
-	from := time.Now().Add(-e.Cfg.CandleWarmup)
 	tf := e.Cfg.Timeframe
 	if tf <= 0 {
 		tf = time.Hour
+	}
+	// Prefer strategy warmup (+7d buffer) over a flat 120d window — 1m×120d
+	// is ~170k candles and trips venue rate limits on cold start.
+	needBars := strategy.Warmup(e.liveCfg) + int((7*24*time.Hour)/tf)
+	if needBars < 500 {
+		needBars = 500
+	}
+	fromWarm := time.Now().Add(-time.Duration(needBars) * tf)
+	fromCap := time.Now().Add(-e.Cfg.CandleWarmup)
+	from := fromWarm
+	if from.Before(fromCap) {
+		from = fromCap // never exceed configured CandleWarmup
 	}
 	for _, sym := range e.Cfg.Symbols {
 		meta, ok := e.Markets[sym]

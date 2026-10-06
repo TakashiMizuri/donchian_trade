@@ -23,12 +23,18 @@ type HTTPClient struct {
 	AuthToken string
 	mu        sync.Mutex
 	tokenFn   func(context.Context) (string, error)
+
+	// Public REST pacing (candles backfill hammers /candles on 1m).
+	minInterval time.Duration
+	lastReq     time.Time
+	rateMu      sync.Mutex
 }
 
 func NewHTTP(baseURL string) *HTTPClient {
 	return &HTTPClient{
-		BaseURL: strings.TrimRight(baseURL, "/"),
-		HTTP:    &http.Client{Timeout: 20 * time.Second},
+		BaseURL:     strings.TrimRight(baseURL, "/"),
+		HTTP:        &http.Client{Timeout: 20 * time.Second},
+		minInterval: 150 * time.Millisecond,
 	}
 }
 
@@ -36,41 +42,103 @@ func (c *HTTPClient) SetTokenSource(fn func(context.Context) (string, error)) {
 	c.tokenFn = fn
 }
 
+func (c *HTTPClient) pace(ctx context.Context) error {
+	c.rateMu.Lock()
+	defer c.rateMu.Unlock()
+	gap := c.minInterval
+	if gap <= 0 {
+		gap = 150 * time.Millisecond
+	}
+	if !c.lastReq.IsZero() {
+		if wait := gap - time.Since(c.lastReq); wait > 0 {
+			t := time.NewTimer(wait)
+			defer t.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-t.C:
+			}
+		}
+	}
+	c.lastReq = time.Now()
+	return nil
+}
+
 func (c *HTTPClient) get(ctx context.Context, path string, q url.Values, auth bool) ([]byte, error) {
 	u := c.BaseURL + path
 	if len(q) > 0 {
 		u += "?" + q.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return nil, err
-	}
-	if auth {
-		tok := c.AuthToken
-		if c.tokenFn != nil {
-			t, err := c.tokenFn(ctx)
-			if err != nil {
-				return nil, err
+	var lastErr error
+	for attempt := 0; attempt < 12; attempt++ {
+		if err := c.pace(ctx); err != nil {
+			return nil, err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return nil, err
+		}
+		if auth {
+			tok := c.AuthToken
+			if c.tokenFn != nil {
+				t, err := c.tokenFn(ctx)
+				if err != nil {
+					return nil, err
+				}
+				tok = t
 			}
-			tok = t
+			if tok != "" {
+				req.Header.Set("Authorization", tok)
+			}
 		}
-		if tok != "" {
-			req.Header.Set("Authorization", tok)
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		b, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			wait := retryAfter(resp.Header.Get("Retry-After"), attempt)
+			lastErr = fmt.Errorf("GET %s: HTTP 429: %s", path, truncate(string(b), 200))
+			t := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return nil, ctx.Err()
+			case <-t.C:
+			}
+			continue
+		}
+		if resp.StatusCode >= 400 {
+			return nil, fmt.Errorf("GET %s: HTTP %d: %s", path, resp.StatusCode, truncate(string(b), 400))
+		}
+		return b, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("GET %s: rate limited", path)
+	}
+	return nil, lastErr
+}
+
+func retryAfter(hdr string, attempt int) time.Duration {
+	if hdr != "" {
+		if sec, err := strconv.Atoi(strings.TrimSpace(hdr)); err == nil && sec > 0 {
+			d := time.Duration(sec) * time.Second
+			if d > 60*time.Second {
+				d = 60 * time.Second
+			}
+			return d
 		}
 	}
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return nil, err
+	// 1s, 2s, 4s... capped at 30s
+	d := time.Duration(1<<min(attempt, 4)) * time.Second
+	if d > 30*time.Second {
+		d = 30 * time.Second
 	}
-	defer resp.Body.Close()
-	b, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("GET %s: HTTP %d: %s", path, resp.StatusCode, truncate(string(b), 400))
-	}
-	return b, nil
+	return d
 }
 
 func (c *HTTPClient) postForm(ctx context.Context, path string, form url.Values) ([]byte, error) {
