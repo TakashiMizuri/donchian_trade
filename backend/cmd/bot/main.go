@@ -53,7 +53,9 @@ func main() {
 
 	httpClient := lighter.NewHTTP(cfg.BaseURL)
 	markets := map[string]lighter.MarketMeta{}
-	if err := pingMarkets(ctx, httpClient, cfg, markets, log); err != nil {
+	if err := retryTransient(ctx, log, "markets", 2*time.Minute, func() error {
+		return pingMarkets(ctx, httpClient, cfg, markets, log)
+	}); err != nil {
 		log.Error("markets", "err", err)
 		os.Exit(1)
 	}
@@ -94,7 +96,9 @@ func main() {
 		}}
 	}
 
-	if err := eng.Bootstrap(ctx); err != nil {
+	if err := retryTransient(ctx, log, "bootstrap", 2*time.Minute, func() error {
+		return eng.Bootstrap(ctx)
+	}); err != nil {
 		log.Error("bootstrap", "err", err)
 		os.Exit(1)
 	}
@@ -153,4 +157,28 @@ func pingMarkets(ctx context.Context, httpClient *lighter.HTTPClient, cfg *confi
 		log.Info("market", "symbol", k, "id", v.MarketID, "size_decimals", v.SizeDecimals, "price_decimals", v.PriceDecimals)
 	}
 	return nil
+}
+
+// retryTransient keeps the process alive across venue WAF/429 storms instead of
+// docker restart-loops that re-trigger the challenge.
+func retryTransient(ctx context.Context, log *slog.Logger, label string, pause time.Duration, fn func() error) error {
+	attempt := 0
+	for {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		attempt++
+		log.Error(label, "err", err, "attempt", attempt, "retry_in", pause.String())
+		t := time.NewTimer(pause)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return ctx.Err()
+		case <-t.C:
+		}
+	}
 }

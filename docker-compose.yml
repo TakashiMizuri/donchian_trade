@@ -21,7 +21,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 5
-      start_period: 1800s
+      start_period: 600s
     expose:
       - "8080"
 
@@ -36,6 +36,9 @@ services:
       INSTANCE_NAME: ${INSTANCE_B_NAME:-satellite_1m}
     volumes:
       - ./data/b:/data
+    depends_on:
+      bot_a:
+        condition: service_healthy
     logging:
       driver: json-file
       options:
@@ -47,7 +50,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 5
-      start_period: 1800s
+      start_period: 3600s
     expose:
       - "8080"
 

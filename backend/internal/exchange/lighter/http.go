@@ -34,7 +34,7 @@ func NewHTTP(baseURL string) *HTTPClient {
 	return &HTTPClient{
 		BaseURL:     strings.TrimRight(baseURL, "/"),
 		HTTP:        &http.Client{Timeout: 20 * time.Second},
-		minInterval: 150 * time.Millisecond,
+		minInterval: 300 * time.Millisecond,
 	}
 }
 
@@ -47,7 +47,7 @@ func (c *HTTPClient) pace(ctx context.Context) error {
 	defer c.rateMu.Unlock()
 	gap := c.minInterval
 	if gap <= 0 {
-		gap = 150 * time.Millisecond
+		gap = 300 * time.Millisecond
 	}
 	if !c.lastReq.IsZero() {
 		if wait := gap - time.Since(c.lastReq); wait > 0 {
@@ -70,7 +70,7 @@ func (c *HTTPClient) get(ctx context.Context, path string, q url.Values, auth bo
 		u += "?" + q.Encode()
 	}
 	var lastErr error
-	for attempt := 0; attempt < 12; attempt++ {
+	for attempt := 0; attempt < 20; attempt++ {
 		if err := c.pace(ctx); err != nil {
 			return nil, err
 		}
@@ -100,9 +100,9 @@ func (c *HTTPClient) get(ctx context.Context, path string, q url.Values, auth bo
 		if err != nil {
 			return nil, err
 		}
-		if resp.StatusCode == http.StatusTooManyRequests {
-			wait := retryAfter(resp.Header.Get("Retry-After"), attempt)
-			lastErr = fmt.Errorf("GET %s: HTTP 429: %s", path, truncate(string(b), 200))
+		if retryableHTTP(resp.StatusCode, b) {
+			wait := retryAfter(resp.Header.Get("Retry-After"), attempt, resp.StatusCode, b)
+			lastErr = fmt.Errorf("GET %s: HTTP %d: %s", path, resp.StatusCode, truncate(string(b), 200))
 			t := time.NewTimer(wait)
 			select {
 			case <-ctx.Done():
@@ -123,20 +123,46 @@ func (c *HTTPClient) get(ctx context.Context, path string, q url.Values, auth bo
 	return nil, lastErr
 }
 
-func retryAfter(hdr string, attempt int) time.Duration {
+func retryableHTTP(code int, body []byte) bool {
+	if code == http.StatusTooManyRequests || code == http.StatusServiceUnavailable || code == http.StatusBadGateway {
+		return true
+	}
+	// AWS WAF / bot challenge often returns 405/202 with HTML, not JSON.
+	if code == http.StatusMethodNotAllowed || code == http.StatusForbidden || code == http.StatusAccepted {
+		s := string(body)
+		if strings.Contains(s, "Human Verification") ||
+			strings.Contains(s, "awsWaf") ||
+			strings.Contains(s, "Just a moment") ||
+			strings.Contains(s, "<!DOCTYPE html>") {
+			return true
+		}
+	}
+	return false
+}
+
+func retryAfter(hdr string, attempt, status int, body []byte) time.Duration {
 	if hdr != "" {
 		if sec, err := strconv.Atoi(strings.TrimSpace(hdr)); err == nil && sec > 0 {
 			d := time.Duration(sec) * time.Second
-			if d > 60*time.Second {
-				d = 60 * time.Second
+			if d > 3*time.Minute {
+				d = 3 * time.Minute
 			}
 			return d
 		}
 	}
-	// 1s, 2s, 4s... capped at 30s
-	d := time.Duration(1<<min(attempt, 4)) * time.Second
-	if d > 30*time.Second {
-		d = 30 * time.Second
+	waf := strings.Contains(string(body), "Human Verification") || strings.Contains(string(body), "awsWaf")
+	if status == http.StatusMethodNotAllowed || waf {
+		// WAF cool-down: 30s, 45s, 60s... cap 3m
+		d := 30*time.Second + time.Duration(attempt)*15*time.Second
+		if d > 3*time.Minute {
+			d = 3 * time.Minute
+		}
+		return d
+	}
+	// 429 etc: 1s, 2s, 4s... capped at 60s
+	d := time.Duration(1<<min(attempt, 5)) * time.Second
+	if d > 60*time.Second {
+		d = 60 * time.Second
 	}
 	return d
 }
@@ -300,19 +326,30 @@ func (c *HTTPClient) Candles(ctx context.Context, marketID uint16, resolution st
 }
 
 func (c *HTTPClient) Backfill(ctx context.Context, marketID uint16, resolution string, bar time.Duration, from time.Time) ([]strategy.Bar, error) {
+	return c.BackfillRange(ctx, marketID, resolution, bar, from, time.Now().UTC(), nil)
+}
+
+// BackfillRange walks candles from until backwards to from (inclusive window).
+// onBatch is called per page (may be nil); use it to persist progress for resume.
+func (c *HTTPClient) BackfillRange(ctx context.Context, marketID uint16, resolution string, bar time.Duration, from, until time.Time, onBatch func([]strategy.Bar) error) ([]strategy.Bar, error) {
 	if bar <= 0 {
 		bar = time.Hour
 	}
 	if resolution == "" {
 		resolution = "1h"
 	}
+	if until.IsZero() {
+		until = time.Now().UTC()
+	}
+	if !until.After(from) {
+		return nil, nil
+	}
 	// Venue /api/v1/candles caps at 500 rows. Page by 400 bars so short
 	// TFs (1m) stay under the cap — do not inflate to 24h (~1440 1m bars).
 	window := bar * 400
-	end := time.Now().UTC()
 	var all []strategy.Bar
 	seen := map[int64]struct{}{}
-	curEnd := end
+	curEnd := until
 	for curEnd.After(from) {
 		start := curEnd.Add(-window)
 		if start.Before(from) {
@@ -320,18 +357,25 @@ func (c *HTTPClient) Backfill(ctx context.Context, marketID uint16, resolution s
 		}
 		batch, err := c.Candles(ctx, marketID, resolution, start.UnixMilli(), curEnd.UnixMilli(), 500)
 		if err != nil {
-			return nil, err
+			return all, err
 		}
 		if len(batch) == 0 {
 			break
 		}
 		oldest := batch[0].Time
+		var page []strategy.Bar
 		for _, b := range batch {
 			if _, ok := seen[b.Time]; ok {
 				continue
 			}
 			seen[b.Time] = struct{}{}
 			all = append(all, b)
+			page = append(page, b)
+		}
+		if onBatch != nil && len(page) > 0 {
+			if err := onBatch(page); err != nil {
+				return all, err
+			}
 		}
 		curEnd = time.Unix(oldest, 0).UTC().Add(-bar)
 		if len(batch) < 2 {

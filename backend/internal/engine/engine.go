@@ -147,6 +147,44 @@ func (e *Engine) SetWS(ok bool, err string) {
 	}
 }
 
+func (e *Engine) backfillSymbol(ctx context.Context, sym string, meta lighter.MarketMeta, from time.Time, tf time.Duration) error {
+	upsert := func(page []strategy.Bar) error {
+		return e.Store.UpsertCandles(ctx, sym, page)
+	}
+	existing, err := e.Store.LoadCandles(ctx, sym)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	if len(existing) == 0 {
+		_, err := e.HTTP.BackfillRange(ctx, meta.MarketID, e.Cfg.Resolution, tf, from, now, upsert)
+		if err != nil {
+			return fmt.Errorf("backfill %s: %w", sym, err)
+		}
+		return nil
+	}
+	oldest := time.Unix(existing[0].Time, 0).UTC()
+	newest := time.Unix(existing[len(existing)-1].Time, 0).UTC()
+	// Resume older history first (partial 1m warmups often die mid-walk).
+	if oldest.After(from.Add(tf)) {
+		n, err := e.HTTP.BackfillRange(ctx, meta.MarketID, e.Cfg.Resolution, tf, from, oldest, upsert)
+		if err != nil {
+			return fmt.Errorf("backfill %s history: %w", sym, err)
+		}
+		e.Log.Info("backfill history", "symbol", sym, "added", len(n), "from", from, "until", oldest)
+	}
+	tipFrom := newest.Add(-2 * tf)
+	if tipFrom.Before(from) {
+		tipFrom = from
+	}
+	n, err := e.HTTP.BackfillRange(ctx, meta.MarketID, e.Cfg.Resolution, tf, tipFrom, now, upsert)
+	if err != nil {
+		return fmt.Errorf("backfill %s tip: %w", sym, err)
+	}
+	e.Log.Info("backfill tip", "symbol", sym, "added", len(n))
+	return nil
+}
+
 func (e *Engine) Bootstrap(ctx context.Context) error {
 	if err := e.lockStrategyFingerprint(ctx); err != nil {
 		return err
@@ -172,19 +210,7 @@ func (e *Engine) Bootstrap(ctx context.Context) error {
 		if !ok {
 			return fmt.Errorf("no market meta for %s", sym)
 		}
-		existing, err := e.Store.LoadCandles(ctx, sym)
-		if err != nil {
-			return err
-		}
-		needFrom := from
-		if len(existing) > 0 {
-			needFrom = time.Unix(existing[len(existing)-1].Time, 0).Add(-2 * tf)
-		}
-		fresh, err := e.HTTP.Backfill(ctx, meta.MarketID, e.Cfg.Resolution, tf, needFrom)
-		if err != nil {
-			return fmt.Errorf("backfill %s: %w", sym, err)
-		}
-		if err := e.Store.UpsertCandles(ctx, sym, fresh); err != nil {
+		if err := e.backfillSymbol(ctx, sym, meta, from, tf); err != nil {
 			return err
 		}
 		bars, err := e.Store.LoadCandles(ctx, sym)
