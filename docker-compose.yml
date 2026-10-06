@@ -7,7 +7,7 @@ services:
       SQLITE_PATH: /data/bot.db
       HTTP_ADDR: :8080
       INSTANCE_ID: a
-      INSTANCE_NAME: ${INSTANCE_A_NAME:-main}
+      INSTANCE_NAME: ${INSTANCE_A_NAME:-main_5m}
     volumes:
       - ./data/a:/data
     logging:
@@ -21,7 +21,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 5
-      start_period: 120s
+      start_period: 600s
     expose:
       - "8080"
 
@@ -33,7 +33,7 @@ services:
       SQLITE_PATH: /data/bot.db
       HTTP_ADDR: :8080
       INSTANCE_ID: b
-      INSTANCE_NAME: ${INSTANCE_B_NAME:-alt}
+      INSTANCE_NAME: ${INSTANCE_B_NAME:-satellite_1m}
     volumes:
       - ./data/b:/data
     logging:
@@ -47,7 +47,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 5
-      start_period: 120s
+      start_period: 600s
     expose:
       - "8080"
 

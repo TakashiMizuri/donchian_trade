@@ -79,6 +79,48 @@ func TestFiveMTstop20hPreset(t *testing.T) {
 	}
 }
 
+func TestOneMTstop14hSatellitePreset(t *testing.T) {
+	t.Setenv("DONCHIAN_TAG", "1m_N1800_M900_ATR1200_R1.0_brk0.5_vol0.64_tstop14h_satellite")
+	t.Setenv("DONCHIAN_TIMEFRAME", "1m")
+	t.Setenv("DONCHIAN_BAR_SECONDS", "60")
+	t.Setenv("DONCHIAN_CHANNEL_N", "1800")
+	t.Setenv("DONCHIAN_EXIT_M", "900")
+	t.Setenv("DONCHIAN_ATR_PERIOD", "1200")
+	t.Setenv("DONCHIAN_LIVE_PROFILE", "brk0.5+vol_rank")
+	t.Setenv("DONCHIAN_MIN_BREAKOUT_ATR", "0.5")
+	t.Setenv("DONCHIAN_MAX_VOL_RANK", "0.64")
+	t.Setenv("DONCHIAN_VOL_RANK_BARS", "1200")
+	t.Setenv("DONCHIAN_VOL_RANK_LOOKBACK", "60000")
+	t.Setenv("DONCHIAN_MAX_BARS_IN_TRADE", "840")
+	t.Setenv("DONCHIAN_SHADOW_MAX_BARS_IN_TRADE", "0")
+	t.Setenv("DONCHIAN_MAX_RISK_USD", "1000")
+	t.Setenv("SYMBOLS", "BTC")
+	cfg := loadWithPass(t)
+	if cfg.Resolution != "1m" || cfg.BarSeconds != 60 || cfg.Timeframe != time.Minute {
+		t.Fatalf("tf %s %d %v", cfg.Resolution, cfg.BarSeconds, cfg.Timeframe)
+	}
+	if cfg.ChannelN != 1800 || cfg.ExitM != 900 || cfg.ATRPeriod != 1200 {
+		t.Fatalf("n/m/atr %d/%d/%d", cfg.ChannelN, cfg.ExitM, cfg.ATRPeriod)
+	}
+	if cfg.VolRankBars != 1200 || cfg.VolRankLookback != 60000 {
+		t.Fatalf("vol windows %d/%d", cfg.VolRankBars, cfg.VolRankLookback)
+	}
+	if cfg.MaxRiskUSD != 1000 {
+		t.Fatalf("cap %v", cfg.MaxRiskUSD)
+	}
+	live := cfg.LiveConfig()
+	twin := cfg.ShadowTwinConfig()
+	if live.MaxBarsInTrade != 840 || twin.MaxBarsInTrade != 0 {
+		t.Fatalf("tstop live=%d twin=%d", live.MaxBarsInTrade, twin.MaxBarsInTrade)
+	}
+	if warm := strategy.Warmup(live); warm < 61200 {
+		t.Fatalf("warmup %d want ≥61200", warm)
+	}
+	if !strings.Contains(cfg.Tag, "tstop14h") || !strings.Contains(cfg.Tag, "satellite") {
+		t.Fatalf("tag missing satellite/tstop14h: %s", cfg.Tag)
+	}
+}
+
 func TestOneHourBaselinePreset(t *testing.T) {
 	t.Setenv("DONCHIAN_TIMEFRAME", "1h")
 	t.Setenv("DONCHIAN_CHANNEL_N", "30")

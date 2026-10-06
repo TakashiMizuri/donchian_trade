@@ -223,8 +223,8 @@ export type InstanceInfo = {
 
 const INSTANCE_KEY = "donchian_instance_id";
 const DEFAULT_INSTANCES: InstanceInfo[] = [
-  { id: "a", name: "main", prefix: "/api/a" },
-  { id: "b", name: "alt", prefix: "/api/b" },
+  { id: "a", name: "main_5m", prefix: "/api/a" },
+  { id: "b", name: "satellite_1m", prefix: "/api/b" },
 ];
 
 let instancesCache: InstanceInfo[] | null = null;

@@ -1,8 +1,13 @@
 # Donchian Live — автоторговый бот на Lighter
 
-Алго-бот по стратегии **Donchian / Turtle breakout**. Профиль **читается из `.env.a` / `.env.b`** (два кошелька, один дашборд). Текущий live-кандидат: `5m` · `N=360` · `M=180` · `ATR(240)×1.5` · risk `1%` · cap `$625` · **`brk0.5+vol_rank`** · **tstop 20h** (240 bars). Контракт: [`docs/DONCHIAN_LIVE_STARTPACK_5M_BRK_VOL_TSTOP20.md`](docs/DONCHIAN_LIVE_STARTPACK_5M_BRK_VOL_TSTOP20.md).
+Алго-бот по стратегии **Donchian / Turtle breakout**. Два инстанса за одним дашбордом (`.env.a` / `.env.b`):
 
-Контракт механизма: [`docs/DONCHIAN_LIVE_STARTPACK.md`](docs/DONCHIAN_LIVE_STARTPACK.md). Кандидат 5m+tstop: [`docs/DONCHIAN_LIVE_STARTPACK_5M_BRK_VOL_TSTOP20.md`](docs/DONCHIAN_LIVE_STARTPACK_5M_BRK_VOL_TSTOP20.md). Смена TF/N/M/tstop — новый run (новый `bot.db`), не «докрутка» старого журнала. Live vs shadow (три книги, verdict WAIT/STOP): **§17**.
+| Инстанс | Роль | Профиль | Контракт |
+|---------|------|---------|----------|
+| `bot_a` | **Primary** | `5m` · N360/M180/ATR240 · risk 1% · cap $625 · brk+vol · **tstop 20h** | [`DONCHIAN_LIVE_STARTPACK_5M_BRK_VOL_TSTOP20.md`](docs/DONCHIAN_LIVE_STARTPACK_5M_BRK_VOL_TSTOP20.md) |
+| `bot_b` | **Satellite** (write-off) | `1m` · N1800/M900/ATR1200 · risk 1% · cap $1000 · brk+vol · **tstop 14h** · BTC only | [`DONCHIAN_LIVE_STARTPACK_1M_BRK_VOL_TSTOP14.md`](docs/DONCHIAN_LIVE_STARTPACK_1M_BRK_VOL_TSTOP14.md) |
+
+Контракт механизма: [`docs/DONCHIAN_LIVE_STARTPACK.md`](docs/DONCHIAN_LIVE_STARTPACK.md). Смена TF/N/M/tstop — новый run (новый `bot.db`), не «докрутка» старого журнала. Live vs shadow (три книги, verdict WAIT/STOP): **§17**. Satellite **не** замена primary.
 
 | Слой | Стек |
 |------|------|
@@ -45,7 +50,8 @@ Lighter REST + WS ←  bot (свечи из DONCHIAN_TIMEFRAME, IOC market, redu
 
 Подробные JSONL-логи: `LOG_DIR` (default `/data/logs`), файлы `bot-YYYYMMDD.jsonl`. Копия с прод: `docker compose exec bot_a ls /data/logs`.  
 Детект закрытия свечи (WS `t`↑ + boundary REST): [`docs/LATENCY_CANDLE_CLOSE.md`](docs/LATENCY_CANDLE_CLOSE.md).  
-5m + tstop20h: [`docs/DONCHIAN_LIVE_STARTPACK_5M_BRK_VOL_TSTOP20.md`](docs/DONCHIAN_LIVE_STARTPACK_5M_BRK_VOL_TSTOP20.md).
+5m + tstop20h: [`docs/DONCHIAN_LIVE_STARTPACK_5M_BRK_VOL_TSTOP20.md`](docs/DONCHIAN_LIVE_STARTPACK_5M_BRK_VOL_TSTOP20.md).  
+1m satellite + tstop14h: [`docs/DONCHIAN_LIVE_STARTPACK_1M_BRK_VOL_TSTOP14.md`](docs/DONCHIAN_LIVE_STARTPACK_1M_BRK_VOL_TSTOP14.md).
 
 **Касса shadow = зеркало счёта.** `START_EQUITY` не задаётся. Первое ненулевое equity на бирже — seed всех трёх книг. Дальше пополнения и выводы детектятся как остаток `Δwallet − PnL − комиссии входа` (у Lighter нет нормальной истории депозитов в trading API) и тем же числом пишутся в shadow. PnL и mark не считаются кэш-флоу.
 
@@ -121,26 +127,26 @@ curl "https://api.telegram.org/bot<TOKEN>/getUpdates"
 Прод = **два бота** (`bot_a`, `bot_b`) + один дашборд с переключателем.
 
 ```bash
-cp .env.example .env.a
-cp .env.example .env.b
-# разные LIGHTER_* / DONCHIAN_* в каждом файле
+cp .env.example .env.a          # primary 5m tstop20h
+cp .env.b.example .env.b        # satellite 1m tstop14h
+# .env.a / .env.b: разные LIGHTER_* (счёт или субаккаунт)
 # одинаковый DASHBOARD_PASSWORD в обоих — один логин на дашборде
 mkdir -p data/a data/b
 # опционально имена в UI (host .env для compose):
 # echo 'INSTANCE_A_NAME=main_5m' >> .env
-# echo 'INSTANCE_B_NAME=alt_15m' >> .env
+# echo 'INSTANCE_B_NAME=satellite_1m' >> .env
 ```
 
 | Переменная | Смысл | Пример |
 |------------|--------|--------|
 | `INSTANCE_ID` | id инстанса (compose задаёт `a`/`b`) | `a` |
-| `INSTANCE_NAME` | подпись в UI / status | `main` |
+| `INSTANCE_NAME` | подпись в UI / status | `main_5m` / `satellite_1m` |
 | `LIGHTER_NETWORK` | `testnet` или `mainnet` | `testnet` |
 | `LIGHTER_API_PRIVATE_KEY` | hex private key API | `0xabc...` |
-| `LIGHTER_ACCOUNT_INDEX` | индекс аккаунта | `12345` |
+| `LIGHTER_ACCOUNT_INDEX` | индекс аккаунта / субаккаунта | `12345` |
 | `LIGHTER_API_KEY_INDEX` | 4–254 | `4` |
-| `SYMBOLS` | инструменты | `BTC` |
-| `DONCHIAN_TIMEFRAME` | свеча Lighter: `1h` `30m` `15m` `5m` | `5m` (кандидат) |
+| `SYMBOLS` | инструменты | `BTC,ETH` (a) / `BTC` (b) |
+| `DONCHIAN_TIMEFRAME` | свеча Lighter: `1h` `30m` `15m` `5m` `1m` | `5m` / `1m` |
 | `DONCHIAN_CHANNEL_N` | баров входа | `360` |
 | `DONCHIAN_EXIT_M` | баров выхода | `180` |
 | `DONCHIAN_ATR_PERIOD` | SMA-TR | `240` |
@@ -175,7 +181,7 @@ mkdir -p data/a data/b
 
 Параметры стратегии (`DONCHIAN_TIMEFRAME`, N, M, ATR, stop, риск, cap, фильтры) читаются из `.env.a` / `.env.b`. Смена TF на уже существующей SQLite запрещена — архивируйте `data/a/bot.db` или `data/b/bot.db` и стартуйте новый run.
 
-Данные изолированы: `data/a/` и `data/b/`. Wipe одного инстанса не трогает второй. В UI — переключатель main/alt (или `INSTANCE_*_NAME`). Kill/resume действует только на выбранный инстанс. Telegram лучше развести по токену или chat id на каждый `.env.*`.
+Данные изолированы: `data/a/` и `data/b/`. Wipe одного инстанса не трогает второй. В UI — переключатель `main_5m` / `satellite_1m` (или `INSTANCE_*_NAME`). Kill/resume действует только на выбранный инстанс. Telegram лучше развести по токену или chat id на каждый `.env.*`. Satellite = отдельный write-off баланс; PnL с primary не смешивать; после просадки satellite не доливать «молча».
 
 Миграция со старого одного бота:
 
@@ -186,7 +192,7 @@ mv data/logs data/a/logs 2>/dev/null || true
 mv data/reports data/a/reports 2>/dev/null || true
 mv data/equity_snapshots.csv data/a/ 2>/dev/null || true
 cp .env .env.a
-cp .env.example .env.b   # заполнить второй кошелёк
+cp .env.b.example .env.b   # satellite 1m — заполнить LIGHTER_* субаккаунта
 ```
 
 ---

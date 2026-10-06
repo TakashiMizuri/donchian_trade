@@ -238,11 +238,9 @@ func (c *HTTPClient) Backfill(ctx context.Context, marketID uint16, resolution s
 	if resolution == "" {
 		resolution = "1h"
 	}
-	// Venue /api/v1/candles caps at 500 rows. Keep a window under that.
+	// Venue /api/v1/candles caps at 500 rows. Page by 400 bars so short
+	// TFs (1m) stay under the cap — do not inflate to 24h (~1440 1m bars).
 	window := bar * 400
-	if window < 24*time.Hour {
-		window = 24 * time.Hour
-	}
 	end := time.Now().UTC()
 	var all []strategy.Bar
 	seen := map[int64]struct{}{}

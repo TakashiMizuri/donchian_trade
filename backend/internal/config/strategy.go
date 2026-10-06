@@ -16,6 +16,7 @@ var allowedTF = map[string]time.Duration{
 	"30m": 30 * time.Minute,
 	"15m": 15 * time.Minute,
 	"5m":  5 * time.Minute,
+	"1m":  time.Minute,
 }
 
 const (
@@ -34,7 +35,7 @@ func applyStrategyEnv(cfg *Config) error {
 	tf := strings.ToLower(strings.TrimSpace(getenv("DONCHIAN_TIMEFRAME", defaultTF)))
 	bar, ok := allowedTF[tf]
 	if !ok {
-		return fmt.Errorf("DONCHIAN_TIMEFRAME %q not in 1h,30m,15m,5m", tf)
+		return fmt.Errorf("DONCHIAN_TIMEFRAME %q not in 1h,30m,15m,5m,1m", tf)
 	}
 	wantSec := int(bar / time.Second)
 	if raw := strings.TrimSpace(os.Getenv("DONCHIAN_BAR_SECONDS")); raw != "" {
