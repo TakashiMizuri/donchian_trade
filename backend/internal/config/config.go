@@ -46,6 +46,10 @@ type Config struct {
 	WatchdogEvery     time.Duration
 	LogDir            string
 
+	// Multi-instance deploy: id is used in cookie name; name is shown on dashboard.
+	InstanceID   string
+	InstanceName string
+
 	Tag         string
 	Resolution  string // Lighter candle interval: 1h, 30m, 15m, 5m
 	BarSeconds  int
@@ -98,6 +102,11 @@ func Load() (*Config, error) {
 		ReconcileEvery:    15 * time.Second,
 		WatchdogEvery:     20 * time.Second,
 		LogDir:            getenv("LOG_DIR", "./data/logs"),
+		InstanceID:        sanitizeInstanceID(getenv("INSTANCE_ID", "a")),
+		InstanceName:      strings.TrimSpace(getenv("INSTANCE_NAME", "")),
+	}
+	if cfg.InstanceName == "" {
+		cfg.InstanceName = cfg.InstanceID
 	}
 	if err := applyStrategyEnv(cfg); err != nil {
 		return nil, err
@@ -189,4 +198,30 @@ func parseChatIDs(s string) []int64 {
 		}
 	}
 	return out
+}
+
+func sanitizeInstanceID(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return "a"
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			b.WriteRune(r)
+		}
+	}
+	out := b.String()
+	if out == "" {
+		return "a"
+	}
+	if len(out) > 32 {
+		out = out[:32]
+	}
+	return out
+}
+
+// SessionCookieName is per-instance so two bots behind one dashboard can stay logged in.
+func (c *Config) SessionCookieName() string {
+	return "donchian_session_" + c.InstanceID
 }

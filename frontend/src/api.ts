@@ -52,6 +52,8 @@ export type Report = {
 export type Status = {
   network: string;
   strategy: string;
+  instance_id?: string;
+  instance_name?: string;
   kill_switch: boolean;
   dry_run: boolean;
   ws_connected: boolean;
@@ -213,8 +215,61 @@ export type Stats = {
   max_dd: number;
 };
 
-async function req<T>(url: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(url, { credentials: "include", ...init });
+export type InstanceInfo = {
+  id: string;
+  name: string;
+  prefix: string;
+};
+
+const INSTANCE_KEY = "donchian_instance_id";
+const DEFAULT_INSTANCES: InstanceInfo[] = [
+  { id: "a", name: "main", prefix: "/api/a" },
+  { id: "b", name: "alt", prefix: "/api/b" },
+];
+
+let instancesCache: InstanceInfo[] | null = null;
+let currentInstanceId = localStorage.getItem(INSTANCE_KEY) || "a";
+
+export function getInstanceId() {
+  return currentInstanceId;
+}
+
+export function getApiPrefix() {
+  const list = instancesCache ?? DEFAULT_INSTANCES;
+  const hit = list.find((i) => i.id === currentInstanceId) ?? list[0] ?? DEFAULT_INSTANCES[0];
+  return hit.prefix;
+}
+
+export function setInstanceId(id: string) {
+  currentInstanceId = id;
+  localStorage.setItem(INSTANCE_KEY, id);
+}
+
+export async function loadInstances(): Promise<InstanceInfo[]> {
+  try {
+    const r = await fetch("/api/instances", { credentials: "include" });
+    if (!r.ok) throw new Error("instances");
+    const body = (await r.json()) as { instances?: InstanceInfo[] };
+    const list = Array.isArray(body.instances) && body.instances.length ? body.instances : DEFAULT_INSTANCES;
+    instancesCache = list;
+    if (!list.some((i) => i.id === currentInstanceId)) {
+      setInstanceId(list[0].id);
+    }
+    return list;
+  } catch {
+    instancesCache = DEFAULT_INSTANCES;
+    return DEFAULT_INSTANCES;
+  }
+}
+
+function apiPath(path: string) {
+  // path like "/status" or "/bar_logs?x=1"
+  const p = path.startsWith("/") ? path : `/${path}`;
+  return `${getApiPrefix()}${p}`;
+}
+
+async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  const r = await fetch(apiPath(path), { credentials: "include", ...init });
   if (r.status === 401) {
     throw new Error("auth");
   }
@@ -226,32 +281,51 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  login: (password: string) =>
-    req<{ ok: string }>("/api/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password }),
-    }),
-  logout: () => fetch("/api/logout", { method: "POST", credentials: "include" }),
-  status: () => req<Status>("/api/status"),
-  trades: () => req<Trade[]>("/api/trades"),
-  equity: () => req<CurvePoint[]>("/api/equity"),
-  stats: () => req<Stats>("/api/stats"),
-  events: () => req<EventRow[]>("/api/events"),
-  telemetry: () => req<Report>("/api/telemetry"),
-  mismatches: () => req<Mismatch[]>("/api/mismatches"),
-  cash: () => req<{ cash_base: number; flows: CashFlow[] }>("/api/cash"),
-  report: () => req<DailyReport>("/api/report"),
-  analysis: () => req<Analysis>("/api/analysis"),
+  instances: () => loadInstances(),
+  login: async (password: string) => {
+    const list = await loadInstances();
+    const body = JSON.stringify({ password });
+    const results = await Promise.all(
+      list.map(async (inst) => {
+        const r = await fetch(`${inst.prefix}/login`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body,
+        });
+        return { id: inst.id, ok: r.ok };
+      }),
+    );
+    if (!results.some((x) => x.ok)) {
+      throw new Error("auth");
+    }
+    return { ok: "1" };
+  },
+  logout: async () => {
+    const list = await loadInstances();
+    await Promise.all(
+      list.map((inst) => fetch(`${inst.prefix}/logout`, { method: "POST", credentials: "include" })),
+    );
+  },
+  status: () => req<Status>("/status"),
+  trades: () => req<Trade[]>("/trades"),
+  equity: () => req<CurvePoint[]>("/equity"),
+  stats: () => req<Stats>("/stats"),
+  events: () => req<EventRow[]>("/events"),
+  telemetry: () => req<Report>("/telemetry"),
+  mismatches: () => req<Mismatch[]>("/mismatches"),
+  cash: () => req<{ cash_base: number; flows: CashFlow[] }>("/cash"),
+  report: () => req<DailyReport>("/report"),
+  analysis: () => req<Analysis>("/analysis"),
   barLogs: (symbol?: string, limit?: number) => {
     const q = new URLSearchParams();
     if (symbol) q.set("symbol", symbol);
     if (limit != null) q.set("limit", String(limit));
     const qs = q.toString();
-    return req<BarLog[]>(`/api/bar_logs${qs ? `?${qs}` : ""}`);
+    return req<BarLog[]>(`/bar_logs${qs ? `?${qs}` : ""}`);
   },
-  kill: () => req<{ ok: string }>("/api/kill", { method: "POST" }),
-  resume: () => req<{ ok: string }>("/api/resume", { method: "POST" }),
+  kill: () => req<{ ok: string }>("/kill", { method: "POST" }),
+  resume: () => req<{ ok: string }>("/resume", { method: "POST" }),
 };
 
 export function fmtPx(n: number) {

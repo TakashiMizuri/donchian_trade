@@ -16,11 +16,12 @@ import (
 )
 
 type Server struct {
-	Addr     string
-	Password string
-	Secure   bool
-	Engine   *engine.Engine
-	Store    *store.Store
+	Addr        string
+	Password    string
+	Secure      bool
+	CookieName  string
+	Engine      *engine.Engine
+	Store       *store.Store
 
 	mu       sync.Mutex
 	sessions map[string]time.Time
@@ -28,8 +29,15 @@ type Server struct {
 }
 
 func New(addr, password string, secure bool, eng *engine.Engine, st *store.Store) *Server {
+	return NewWithCookie(addr, password, secure, "donchian_session", eng, st)
+}
+
+func NewWithCookie(addr, password string, secure bool, cookieName string, eng *engine.Engine, st *store.Store) *Server {
+	if cookieName == "" {
+		cookieName = "donchian_session"
+	}
 	return &Server{
-		Addr: addr, Password: password, Secure: secure,
+		Addr: addr, Password: password, Secure: secure, CookieName: cookieName,
 		Engine: eng, Store: st, sessions: map[string]time.Time{}, fails: map[string][]time.Time{},
 	}
 }
@@ -142,7 +150,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	s.sessions[tok] = time.Now().Add(14 * 24 * time.Hour)
 	s.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{
-		Name:     "donchian_session",
+		Name:     s.CookieName,
 		Value:    tok,
 		Path:     "/",
 		HttpOnly: true,
@@ -154,18 +162,18 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie("donchian_session"); err == nil {
+	if c, err := r.Cookie(s.CookieName); err == nil {
 		s.mu.Lock()
 		delete(s.sessions, c.Value)
 		s.mu.Unlock()
 	}
-	http.SetCookie(w, &http.Cookie{Name: "donchian_session", Value: "", Path: "/", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: s.CookieName, Value: "", Path: "/", MaxAge: -1})
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "1"})
 }
 
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		c, err := r.Cookie("donchian_session")
+		c, err := r.Cookie(s.CookieName)
 		if err != nil {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "auth"})
 			return

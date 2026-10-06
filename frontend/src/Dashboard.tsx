@@ -6,11 +6,14 @@ import {
   CashFlow,
   DailyReport,
   EventRow,
+  InstanceInfo,
   Mismatch,
   Stats,
   Status,
   Trade,
   api,
+  getInstanceId,
+  setInstanceId,
 } from "./api";
 import { networkLabel, strategyLabel } from "./labels";
 import { ExecutionTab } from "./sections/ExecutionTab";
@@ -28,6 +31,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 
 export default function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [tab, setTab] = useState("overview");
+  const [instances, setInstances] = useState<InstanceInfo[]>([]);
+  const [instanceId, setInstanceIdState] = useState(getInstanceId());
   const [status, setStatus] = useState<Status | null>(null);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [equity, setEquity] = useState<Awaited<ReturnType<typeof api.equity>>>([]);
@@ -73,13 +78,28 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
   }
 
   useEffect(() => {
+    void api.instances().then(setInstances);
+  }, []);
+
+  useEffect(() => {
+    setStatus(null);
     void refresh();
     const id = setInterval(() => void refresh(), 15000);
     return () => clearInterval(id);
-  }, []);
+  }, [instanceId]);
+
+  async function onInstanceChange(next: string) {
+    if (next === instanceId) return;
+    setInstanceId(next);
+    setInstanceIdState(next);
+  }
 
   const activeVerdict = status?.kill_switch ? "STOP" : status?.verdict || "WAIT";
   const symbolList = (status?.symbols ?? []).map((s) => s.symbol);
+  const instanceLabel =
+    status?.instance_name ||
+    instances.find((i) => i.id === instanceId)?.name ||
+    instanceId;
 
   return (
     <div className="mx-auto flex min-h-dvh max-w-5xl flex-col">
@@ -88,11 +108,25 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
           <div className="font-heading text-sm font-medium">Donchian</div>
           <div className="truncate text-xs text-muted-foreground">
             {status
-              ? `${networkLabel(status.network, status.dry_run)} · ${strategyLabel(status.strategy)}`
+              ? `${instanceLabel} · ${networkLabel(status.network, status.dry_run)} · ${strategyLabel(status.strategy)}`
               : "загрузка…"}
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {instances.length > 0 ? (
+            <select
+              className="h-8 max-w-[9rem] rounded-md border bg-background px-2 text-xs"
+              aria-label="Инстанс"
+              value={instanceId}
+              onChange={(e) => void onInstanceChange(e.target.value)}
+            >
+              {instances.map((i) => (
+                <option key={i.id} value={i.id}>
+                  {i.name}
+                </option>
+              ))}
+            </select>
+          ) : null}
           {status ? <VerdictBadge verdict={activeVerdict} /> : null}
           <Badge variant={status?.ws_connected ? "secondary" : "destructive"}>
             {status?.ws_connected ? "стрим" : "нет стрима"}

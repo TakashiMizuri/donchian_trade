@@ -239,6 +239,8 @@ func (c *Config) Fingerprint() string {
 
 func (c *Config) ProfileLog() []any {
 	return []any{
+		"instance_id", c.InstanceID,
+		"instance_name", c.InstanceName,
 		"tag", c.Tag,
 		"tf", c.Resolution,
 		"n", c.ChannelN,

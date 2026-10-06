@@ -8,10 +8,15 @@ export default function App() {
   const [authed, setAuthed] = useState<boolean | null>(null);
 
   useEffect(() => {
-    api
-      .status()
-      .then(() => setAuthed(true))
-      .catch(() => setAuthed(false));
+    void (async () => {
+      await api.instances();
+      try {
+        await api.status();
+        setAuthed(true);
+      } catch {
+        setAuthed(false);
+      }
+    })();
   }, []);
 
   if (authed === null) {

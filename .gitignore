@@ -1,5 +1,7 @@
 # secrets & runtime
 .env
+.env.a
+.env.b
 testnet.txt
 mainnet.txt
 data/

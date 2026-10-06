@@ -1,6 +1,6 @@
 # Donchian Live — автоторговый бот на Lighter
 
-Алго-бот по стратегии **Donchian / Turtle breakout**. Профиль **читается из `.env`**. Текущий live-кандидат: `5m` · `N=360` · `M=180` · `ATR(240)×1.5` · risk `1%` · cap `$625` · **`brk0.5+vol_rank`** · **tstop 20h** (240 bars). Контракт: [`docs/DONCHIAN_LIVE_STARTPACK_5M_BRK_VOL_TSTOP20.md`](docs/DONCHIAN_LIVE_STARTPACK_5M_BRK_VOL_TSTOP20.md).
+Алго-бот по стратегии **Donchian / Turtle breakout**. Профиль **читается из `.env.a` / `.env.b`** (два кошелька, один дашборд). Текущий live-кандидат: `5m` · `N=360` · `M=180` · `ATR(240)×1.5` · risk `1%` · cap `$625` · **`brk0.5+vol_rank`** · **tstop 20h** (240 bars). Контракт: [`docs/DONCHIAN_LIVE_STARTPACK_5M_BRK_VOL_TSTOP20.md`](docs/DONCHIAN_LIVE_STARTPACK_5M_BRK_VOL_TSTOP20.md).
 
 Контракт механизма: [`docs/DONCHIAN_LIVE_STARTPACK.md`](docs/DONCHIAN_LIVE_STARTPACK.md). Кандидат 5m+tstop: [`docs/DONCHIAN_LIVE_STARTPACK_5M_BRK_VOL_TSTOP20.md`](docs/DONCHIAN_LIVE_STARTPACK_5M_BRK_VOL_TSTOP20.md). Смена TF/N/M/tstop — новый run (новый `bot.db`), не «докрутка» старого журнала. Live vs shadow (три книги, verdict WAIT/STOP): **§17**.
 
@@ -33,17 +33,17 @@ Research считался на Binance. Live идёт на **Lighter**. Свеч
 ## 1. Архитектура
 
 ```
-Телефон / браузер  →  web (nginx, :8080)  →  /api  →  bot (:8080 внутри сети)
-                                           SQLite /data/bot.db
-Telegram Bot API  ←  bot
-Lighter REST + WS ←  bot  (свечи из DONCHIAN_TIMEFRAME, IOC market, reduce-only stop-loss)
+Телефон / браузер  →  web (nginx, :8080)  →  /api/a|/api/b  →  bot_a / bot_b
+                                           SQLite data/a|b/bot.db
+Telegram Bot API  ←  каждый bot свой
+Lighter REST + WS ←  bot (свечи из DONCHIAN_TIMEFRAME, IOC market, reduce-only stop-loss)
 ```
 
 Решения принимаются **только на закрытой свече выбранного TF**. Сразу после close ставится market IOC (это `open` следующего бара), затем reduce-only **STOP_LOSS** на бирже. Channel-exit — тоже market reduce-only на следующем open.
 
 С бара 0 считаются **три книги** на одних и тех же closed futures: **Live**, **Тень (фильтры)** (DB `shadow_ls5`), **Baseline**. Канон сверки: Live ↔ twin того же live-профиля. Не сравнивать месяц live с yearly fee-0 дашбордом.
 
-Подробные JSONL-логи: `LOG_DIR` (default `/data/logs`), файлы `bot-YYYYMMDD.jsonl`. Копия с прод: `docker compose exec bot ls /data/logs`.  
+Подробные JSONL-логи: `LOG_DIR` (default `/data/logs`), файлы `bot-YYYYMMDD.jsonl`. Копия с прод: `docker compose exec bot_a ls /data/logs`.  
 Детект закрытия свечи (WS `t`↑ + boundary REST): [`docs/LATENCY_CANDLE_CLOSE.md`](docs/LATENCY_CANDLE_CLOSE.md).  
 5m + tstop20h: [`docs/DONCHIAN_LIVE_STARTPACK_5M_BRK_VOL_TSTOP20.md`](docs/DONCHIAN_LIVE_STARTPACK_5M_BRK_VOL_TSTOP20.md).
 
@@ -116,17 +116,25 @@ curl "https://api.telegram.org/bot<TOKEN>/getUpdates"
 
 ---
 
-## 5. Конфигурация (`.env`)
+## 5. Конфигурация (два кошелька)
 
-Скопируйте шаблон:
+Прод = **два бота** (`bot_a`, `bot_b`) + один дашборд с переключателем.
 
 ```bash
-cp .env.example .env
-nano .env
+cp .env.example .env.a
+cp .env.example .env.b
+# разные LIGHTER_* / DONCHIAN_* в каждом файле
+# одинаковый DASHBOARD_PASSWORD в обоих — один логин на дашборде
+mkdir -p data/a data/b
+# опционально имена в UI (host .env для compose):
+# echo 'INSTANCE_A_NAME=main_5m' >> .env
+# echo 'INSTANCE_B_NAME=alt_15m' >> .env
 ```
 
 | Переменная | Смысл | Пример |
 |------------|--------|--------|
+| `INSTANCE_ID` | id инстанса (compose задаёт `a`/`b`) | `a` |
+| `INSTANCE_NAME` | подпись в UI / status | `main` |
 | `LIGHTER_NETWORK` | `testnet` или `mainnet` | `testnet` |
 | `LIGHTER_API_PRIVATE_KEY` | hex private key API | `0xabc...` |
 | `LIGHTER_ACCOUNT_INDEX` | индекс аккаунта | `12345` |
@@ -165,7 +173,21 @@ nano .env
 | `WEB_PORT` | порт дашборда на хосте | `80` (`http://IP/`) |
 | `DOMAIN` | для профиля `tls` | `bot.example.com` |
 
-Параметры стратегии (`DONCHIAN_TIMEFRAME`, N, M, ATR, stop, риск, cap, фильтры) читаются из `.env`. Смена TF на уже существующей SQLite запрещена — архивируйте `data/bot.db` и стартуйте новый run.
+Параметры стратегии (`DONCHIAN_TIMEFRAME`, N, M, ATR, stop, риск, cap, фильтры) читаются из `.env.a` / `.env.b`. Смена TF на уже существующей SQLite запрещена — архивируйте `data/a/bot.db` или `data/b/bot.db` и стартуйте новый run.
+
+Данные изолированы: `data/a/` и `data/b/`. Wipe одного инстанса не трогает второй. В UI — переключатель main/alt (или `INSTANCE_*_NAME`). Kill/resume действует только на выбранный инстанс. Telegram лучше развести по токену или chat id на каждый `.env.*`.
+
+Миграция со старого одного бота:
+
+```bash
+mkdir -p data/a data/b
+mv data/bot.db data/a/ 2>/dev/null || true
+mv data/logs data/a/logs 2>/dev/null || true
+mv data/reports data/a/reports 2>/dev/null || true
+mv data/equity_snapshots.csv data/a/ 2>/dev/null || true
+cp .env .env.a
+cp .env.example .env.b   # заполнить второй кошелёк
+```
 
 ---
 
@@ -214,12 +236,13 @@ sudo mkdir -p /opt/donchian
 sudo chown "$USER:$USER" /opt/donchian
 cd /opt/donchian
 git clone <URL_ЭТОГО_РЕПО> .
-cp .env.example .env
+cp .env.example .env.a
+# заполните .env.a; для локального одного бота достаточно .env.a + временный override
 nano .env
 mkdir -p data backups
 ```
 
-Заполните `.env`. Первый запуск: **`LIGHTER_NETWORK=testnet`**.
+Заполните `.env.a` (и `.env.b`). Первый запуск: **`LIGHTER_NETWORK=testnet`**.
 
 ### 6.5 Сборка и запуск
 
@@ -227,7 +250,7 @@ mkdir -p data backups
 cd /opt/donchian
 docker compose up -d --build
 docker compose ps
-docker compose logs -f bot
+docker compose logs -f bot_a
 ```
 
 Что должно появиться в логах:
@@ -288,11 +311,12 @@ curl "https://mainnet.zklighter.elliot.ai/api/v1/accountsByL1Address?l1_address=
 cd /opt/donchian
 docker compose stop
 mkdir -p backups
-cp -a data "backups/data-testnet-$(date -u +%Y%m%dT%H%M%SZ)"
-rm -f data/bot.db data/bot.db-wal data/bot.db-shm data/equity_snapshots.csv
-rm -rf data/reports
-docker compose rm -f bot
-# логи контейнера уйдут вместе с rm; после up — новая пустая SQLite
+tar czf "backups/data-testnet-$(date -u +%Y%m%dT%H%M%SZ).tgz" data .env.a .env.b
+# wipe one or both instances:
+rm -f data/a/bot.db data/a/bot.db-wal data/a/bot.db-shm data/a/equity_snapshots.csv
+rm -rf data/a/logs data/a/reports
+# rm -f data/b/...   # если сбрасываете второй тоже
+docker compose rm -f bot_a bot_b
 ```
 
 Локальные дампы (`30m_first_day/`, `bot-snap.db`) не трогайте — это архив, не прод.
@@ -321,7 +345,7 @@ CASH_FLOW_MIN_USD=1
 cd /opt/donchian
 git pull
 docker compose up -d --build
-docker compose logs -f bot
+docker compose logs -f bot_a
 ```
 
 В логе должно быть: `network=mainnet`, `strategy profile … tf=30m n=60`, `market symbol=ETH id=0`, `market symbol=BTC id=1` (не 4095/4096), `bootstrapped`, seed ≈ $200. Telegram: «Касса seed +~200». Дашборд: сеть **mainnet**.
@@ -337,14 +361,14 @@ docker compose logs -f bot
 
 ```bash
 cd /opt/donchian
-docker compose exec bot sqlite3 /data/bot.db ".backup /data/bot-preupdate.db"
-cp data/bot-preupdate.db backups/bot-preupdate-$(date -u +%Y%m%dT%H%M%SZ).db
+docker compose exec bot_a sqlite3 /data/bot.db ".backup /data/bot-preupdate.db"
+cp data/a/bot-preupdate.db backups/bot-a-preupdate-$(date -u +%Y%m%dT%H%M%SZ).db
 
 git fetch
 git pull
 docker compose up -d --build
 docker compose ps
-docker compose logs --tail=100 bot
+docker compose logs --tail=100 bot_a
 ```
 
 Если миграции SQLite несовместимы (редко): остановите бота, восстановите бэкап, разберитесь с changelog. Пока схема создаётся `CREATE TABLE IF NOT EXISTS` — обновления обычно безопасны.
@@ -367,22 +391,22 @@ docker compose up -d --build
 
 ```bash
 mkdir -p /opt/donchian/backups
-docker compose exec -T bot sqlite3 /data/bot.db ".backup /data/bot-snap.db"
-cp data/bot-snap.db /opt/donchian/backups/bot-$(date -u +%Y%m%dT%H%M%SZ).db
+docker compose exec -T bot_a sqlite3 /data/bot.db ".backup /data/bot-snap.db"
+cp data/a/bot-snap.db /opt/donchian/backups/bot-a-$(date -u +%Y%m%dT%H%M%SZ).db
 ```
 
 **Офлайн:**
 
 ```bash
-docker compose stop bot
-cp -a data /opt/donchian/backups/data-$(date -u +%Y%m%dT%H%M%SZ)
-docker compose start bot
+docker compose stop bot_a
+cp -a data/a /opt/donchian/backups/data-a-$(date -u +%Y%m%dT%H%M%SZ)
+docker compose start bot_a
 ```
 
 Cron раз в день (root crontab):
 
 ```cron
-15 3 * * * cd /opt/donchian && docker compose exec -T bot sqlite3 /data/bot.db ".backup /data/bot-cron.db" && cp data/bot-cron.db backups/bot-$(date -u +\%Y\%m\%d).db
+15 3 * * * cd /opt/donchian && docker compose exec -T bot_a sqlite3 /data/bot.db ".backup /data/bot-cron.db" && cp data/a/bot-cron.db backups/bot-a-$(date -u +\%Y\%m\%d).db
 ```
 
 Храните копии **вне VPS** (S3, другой сервер). В БД нет API-ключей, но есть вся история сделок.
@@ -392,7 +416,8 @@ Cron раз в день (root crontab):
 ## 10. Логи и наблюдение
 
 ```bash
-docker compose logs -f --tail=200 bot
+docker compose logs -f --tail=200 bot_a
+docker compose logs -f bot_b
 docker compose logs -f web
 ```
 
@@ -416,13 +441,13 @@ Telegram `/status` — то же с телефона без браузера.
 
 | Задача | Как |
 |--------|-----|
-| Рестарт | `docker compose restart bot` — состояние позиции/streak восстанавливается из SQLite + сверка с биржей |
+| Рестарт | `docker compose restart bot_a` (или `bot_b`) — состояние из SQLite + сверка с биржей |
 | Пропущен бар (бот лежал) | при старте backfill выбранного TF и REST-poll закрытых баров; вход состоится на **следующем** валидном close, не «догоняется» история ордерами |
 | Kill-switch | дашборд / Telegram `/kill` — flatten всех позиций, новые входы запрещены |
 | Снять kill | `/resume` или кнопка на дашборде |
 | Место на диске | `df -h`, `docker system df`, бэкапы в `backups/` |
-| Смена пароля дашборда | поменять `DASHBOARD_PASSWORD` в `.env`, `docker compose up -d bot` |
-| Смена API-ключа | новый ключ в `.env`, индекс 4–254, рестарт; nonce начнётся заново |
+| Смена пароля дашборда | один пароль в `.env.a` и `.env.b`, затем `docker compose up -d bot_a bot_b` |
+| Смена API-ключа | новый ключ в `.env.a` или `.env.b`, индекс 4–254, рестарт соответствующего bot_* |
 
 После рестарта бот:
 
@@ -435,7 +460,8 @@ Telegram `/status` — то же с телефона без браузера.
 ## 12. Локальная разработка без Docker
 
 ```bash
-cp .env.example .env
+cp .env.example .env.a
+# заполните .env.a; для локального одного бота достаточно .env.a + временный override
 # SQLITE_PATH=./data/bot.db
 # HTTP_ADDR=:8080
 # можно DRY_RUN=true для UI без ордеров (ключ всё равно нужен, если DRY_RUN=false)
@@ -457,7 +483,7 @@ npm run dev
 
 ## 13. Безопасность
 
-- `.env` не коммитить. Права: `chmod 600 .env`.
+- `.env.a` / `.env.b` не коммитить. Права: `chmod 600 .env.a .env.b`.
 - SSH только по ключу, `PermitRootLogin no`.
 - UFW: 22, 80, 443. Не светить API бота наружу отдельно от nginx/Caddy.
 - `DASHBOARD_PASSWORD` длинный, уникальный. Это не 2FA — при необходимости поставьте VPN (WireGuard) и не публикуйте 80/443.
@@ -470,7 +496,7 @@ npm run dev
 
 | Симптом | Что проверить |
 |---------|----------------|
-| `LIGHTER_API_PRIVATE_KEY is required` | ключ в `.env`, compose подхватил `env_file` |
+| `LIGHTER_API_PRIVATE_KEY is required` | ключ в `.env.a`/`.env.b`, compose подхватил `env_file` |
 | `API_KEY_INDEX must be 4-254` | не 0–3 (заняты приложением Lighter) |
 | `market BTC not found` | сеть testnet/mainnet, символ как на Lighter (`BTC` / `ETH`) |
 | `sendTx code=… nonce` | другой процесс с тем же api_key_index; один бот на ключ |
@@ -487,7 +513,8 @@ npm run dev
 ```bash
 curl -s "https://mainnet.zklighter.elliot.ai/api/v1/orderBookDetails" | head
 curl -s http://127.0.0.1:8080/api/health
-docker compose exec bot wget -qO- http://127.0.0.1:8080/api/health
+docker compose exec bot_a wget -qO- http://127.0.0.1:8080/api/health
+docker compose exec bot_b wget -qO- http://127.0.0.1:8080/api/health
 ```
 
 ---
@@ -498,7 +525,8 @@ docker compose exec bot wget -qO- http://127.0.0.1:8080/api/health
 backend/          Go-бот (cmd/bot, internal/strategy|engine|exchange|store|api|telegram|telemetry|flog)
 frontend/         React-дашборд (Обзор / Сделки / Исполнение / Фильтры / Здоровье)
 deploy/Caddyfile  TLS-прокси
-data/             SQLite + logs/ + equity_snapshots.csv + reports/ (не в git)
+data/a/ data/b/  SQLite + logs/ + equity_snapshots.csv + reports/ (не в git)
+.env.a .env.b     секреты инстансов (не в git)
 docs/DONCHIAN_LIVE_STARTPACK.md
 ```
 

@@ -130,7 +130,7 @@ func main() {
 		go tg.Run(ctx)
 	}
 
-	srv := api.New(cfg.HTTPAddr, cfg.DashboardPassword, cfg.CookieSecure, eng, st)
+	srv := api.NewWithCookie(cfg.HTTPAddr, cfg.DashboardPassword, cfg.CookieSecure, cfg.SessionCookieName(), eng, st)
 	go func() {
 		log.Info("http listen", "addr", cfg.HTTPAddr, "network", cfg.Network)
 		if err := srv.ListenAndServe(); err != nil {

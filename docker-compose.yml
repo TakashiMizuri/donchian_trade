@@ -1,13 +1,41 @@
 services:
-  bot:
+  bot_a:
     build:
       context: ./backend
-    env_file: .env
+    env_file: .env.a
     environment:
       SQLITE_PATH: /data/bot.db
       HTTP_ADDR: :8080
+      INSTANCE_ID: a
+      INSTANCE_NAME: ${INSTANCE_A_NAME:-main}
     volumes:
-      - ./data:/data
+      - ./data/a:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+    expose:
+      - "8080"
+
+  bot_b:
+    build:
+      context: ./backend
+    env_file: .env.b
+    environment:
+      SQLITE_PATH: /data/bot.db
+      HTTP_ADDR: :8080
+      INSTANCE_ID: b
+      INSTANCE_NAME: ${INSTANCE_B_NAME:-alt}
+    volumes:
+      - ./data/b:/data
     logging:
       driver: json-file
       options:
@@ -27,7 +55,9 @@ services:
     build:
       context: ./frontend
     depends_on:
-      bot:
+      bot_a:
+        condition: service_healthy
+      bot_b:
         condition: service_healthy
     restart: unless-stopped
     logging:

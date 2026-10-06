@@ -992,6 +992,8 @@ func (e *Engine) RunBoundaryPoll(ctx context.Context) {
 type Snapshot struct {
 	Network              string           `json:"network"`
 	Strategy             string           `json:"strategy"`
+	InstanceID           string           `json:"instance_id"`
+	InstanceName         string           `json:"instance_name"`
 	KillSwitch           bool             `json:"kill_switch"`
 	DryRun               bool             `json:"dry_run"`
 	WSConnected          bool             `json:"ws_connected"`
@@ -1061,6 +1063,8 @@ func (e *Engine) Snapshot(ctx context.Context) Snapshot {
 	sn := Snapshot{
 		Network:              string(e.Cfg.Network),
 		Strategy:             e.Cfg.Tag,
+		InstanceID:           e.Cfg.InstanceID,
+		InstanceName:         e.Cfg.InstanceName,
 		KillSwitch:           e.Risk.Kill(),
 		DryRun:               e.Cfg.DryRun,
 		WSConnected:          e.wsOK,
