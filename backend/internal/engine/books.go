@@ -107,24 +107,101 @@ func (e *Engine) stepBook(ctx context.Context, symbol, book string, bars []strat
 			st.Position.ID = int(id)
 		}
 	case strategy.ActionExitStop, strategy.ActionExitChannel, strategy.ActionExitTimeStop:
-		if st.Position == nil {
-			return
-		}
-		sig := st.Position.SignalTime
-		t := strategy.Apply(st, cfg, bars, act)
-		if t == nil {
-			return
-		}
-		row, err := e.Store.TradeBySignal(ctx, symbol, book, sig)
-		if err != nil || row == nil {
-			id, _, _ := e.Store.TryOpenTrade(ctx, symbol, book, string(t.Direction), t.SignalTime, t.EntryTime, t.EntryPrice, t.StopLoss, t.RiskDistance, t.Quantity, 0)
-			if id > 0 {
-				_ = e.Store.CloseTrade(ctx, id, t.ExitTime, t.ExitPrice, string(t.Outcome), t.Gross, t.EntryFee, t.ExitFee, 0, t.Net, 0, 0)
-			}
-			return
-		}
-		_ = e.Store.CloseTrade(ctx, row.ID, t.ExitTime, t.ExitPrice, string(t.Outcome), t.Gross, t.EntryFee, t.ExitFee, 0, t.Net, 0, 0)
+		e.closeBookWithAction(ctx, symbol, book, bars, st, cfg, act)
 	}
+}
+
+// closeBookWithAction applies a shadow exit and persists it.
+func (e *Engine) closeBookWithAction(ctx context.Context, symbol, book string, bars []strategy.Bar, st *strategy.State, cfg strategy.Config, act strategy.Action) {
+	if st.Position == nil {
+		return
+	}
+	if net, _, _, err := e.Store.SumNet(ctx, book); err == nil {
+		st.Equity = e.cashBase() + net
+	}
+	sig := st.Position.SignalTime
+	t := strategy.Apply(st, cfg, bars, act)
+	if t == nil {
+		return
+	}
+	row, err := e.Store.TradeBySignal(ctx, symbol, book, sig)
+	if err != nil || row == nil {
+		id, _, _ := e.Store.TryOpenTrade(ctx, symbol, book, string(t.Direction), t.SignalTime, t.EntryTime, t.EntryPrice, t.StopLoss, t.RiskDistance, t.Quantity, 0)
+		if id > 0 {
+			_ = e.Store.CloseTrade(ctx, id, t.ExitTime, t.ExitPrice, string(t.Outcome), t.Gross, t.EntryFee, t.ExitFee, 0, t.Net, 0, 0)
+		}
+		return
+	}
+	_ = e.Store.CloseTrade(ctx, row.ID, t.ExitTime, t.ExitPrice, string(t.Outcome), t.Gross, t.EntryFee, t.ExitFee, 0, t.Net, 0, 0)
+}
+
+// shouldSyncShadowOnLiveSL is true when a shadow book still holds the same-side
+// position after live was stopped out on the exchange (intra-bar), so paper OHLC
+// may never see the stop and would otherwise stay in and cause live_only re-entries.
+func shouldSyncShadowOnLiveSL(liveDir strategy.Direction, shadowPos *strategy.Position) bool {
+	return shadowPos != nil && shadowPos.Direction == liveDir
+}
+
+// syncShadowsAfterLiveSL force-closes twin/baseline when live was flattened by the
+// exchange stop, even if the closed candle high/low never crossed the ATR stop.
+// Shadow exit is filled at the paper stop (research), not the live slip price.
+func (e *Engine) syncShadowsAfterLiveSL(ctx context.Context, symbol string, liveDir strategy.Direction, exitTime int64) {
+	e.mu.Lock()
+	ls5 := e.shadowLS5[symbol]
+	base := e.shadowBase[symbol]
+	bars := append([]strategy.Bar(nil), e.bars[symbol]...)
+	e.mu.Unlock()
+
+	fillIdx := len(bars) - 1
+	if fillIdx < 0 {
+		fillIdx = 0
+	}
+	closeOne := func(book string, st *strategy.State, cfg strategy.Config) bool {
+		if !shouldSyncShadowOnLiveSL(liveDir, st.Position) {
+			return false
+		}
+		stop := st.Position.Stop
+		act := strategy.Action{
+			Kind:       strategy.ActionExitStop,
+			Direction:  st.Position.Direction,
+			Price:      stop,
+			Stop:       stop,
+			Risk:       st.Position.RiskDistance,
+			SignalTime: st.Position.SignalTime,
+			FillIdx:    fillIdx,
+			FillTime:   exitTime,
+		}
+		e.closeBookWithAction(ctx, symbol, book, bars, st, cfg, act)
+		return true
+	}
+
+	synced := false
+	if e.Cfg.ShadowBrkVol {
+		if closeOne(telemetry.BookLS5, &ls5, e.twinCfg) {
+			synced = true
+		}
+	}
+	if e.Cfg.ShadowBaseline {
+		if closeOne(telemetry.BookBaseline, &base, e.baseCfg) {
+			synced = true
+		}
+	}
+	if !synced {
+		return
+	}
+	e.mu.Lock()
+	e.shadowLS5[symbol] = ls5
+	e.shadowBase[symbol] = base
+	e.mu.Unlock()
+	e.persistBook(ctx, symbol, telemetry.BookLS5, ls5, bars)
+	e.persistBook(ctx, symbol, telemetry.BookBaseline, base, bars)
+	if e.Flog != nil {
+		e.Flog.Event("shadow_sync", map[string]any{
+			"symbol": symbol, "reason": "live_exchange_sl", "dir": string(liveDir),
+			"twin_flat": ls5.Position == nil, "base_flat": base.Position == nil,
+		})
+	}
+	e.alert(ctx, "info", "shadow", symbol+" shadow synced flat after live exchange SL")
 }
 
 func (e *Engine) writeBarLog(ctx context.Context, symbol string, bars []strategy.Bar, atr []float64, i int, live, ls5, base strategy.State) {

@@ -715,6 +715,7 @@ func (e *Engine) Reconcile(ctx context.Context) {
 		id   int64
 		stop float64
 		bars []strategy.Bar
+		dir  strategy.Direction
 	}
 	var pending []slClose
 
@@ -730,7 +731,10 @@ func (e *Engine) Reconcile(ctx context.Context) {
 			open, _ := e.Store.OpenLiveTrade(ctx, sym)
 			if open != nil {
 				bars := append([]strategy.Bar(nil), e.bars[sym]...)
-				pending = append(pending, slClose{sym: sym, st: st, id: open.ID, stop: open.Stop.Float64, bars: bars})
+				pending = append(pending, slClose{
+					sym: sym, st: st, id: open.ID, stop: open.Stop.Float64, bars: bars,
+					dir: st.Position.Direction,
+				})
 			}
 			st.Position = nil
 		case !local && hasEx:
@@ -769,7 +773,8 @@ func (e *Engine) Reconcile(ctx context.Context) {
 	e.mu.Unlock()
 
 	for _, p := range pending {
-		act := strategy.Action{Kind: strategy.ActionExitStop, Price: p.stop, FillTime: time.Now().Unix(), FillIdx: len(p.bars) - 1}
+		exitTime := time.Now().Unix()
+		act := strategy.Action{Kind: strategy.ActionExitStop, Price: p.stop, FillTime: exitTime, FillIdx: len(p.bars) - 1}
 		t := strategy.Apply(&p.st, e.liveCfg, p.bars, act)
 		if e.Cfg.DryRun {
 			e.finishClose(ctx, p.sym, p.id, &p.st, t, act)
@@ -777,6 +782,9 @@ func (e *Engine) Reconcile(ctx context.Context) {
 			e.finishCloseLive(ctx, p.sym, p.id, &p.st, t, e.slClientIdx(p.sym), "")
 			e.clearOrderIdx(p.sym)
 		}
+		// Exchange SL can fire on a wick that never appears in the closed candle
+		// OHLC — force twin/baseline flat so live does not re-enter alone (live_only).
+		e.syncShadowsAfterLiveSL(ctx, p.sym, p.dir, exitTime)
 		e.alert(ctx, "info", "reconcile", p.sym+" exchange flat — closed local as SL/fill")
 		if e.Flog != nil {
 			e.Flog.Event("reconcile", map[string]any{"symbol": p.sym, "issue": "exchange_flat_closed_local"})
