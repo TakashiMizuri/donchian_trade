@@ -457,7 +457,10 @@ func (c *HTTPClient) BackfillRange(ctx context.Context, marketID uint16, resolut
 		if start.Before(from) {
 			start = from
 		}
-		batch, err := c.Candles(ctx, marketID, resolution, start.UnixMilli(), curEnd.UnixMilli(), 500)
+		// Near-"now" pages must refresh end on 429/WAF wait; a frozen tip left
+		// 1m lastBar minutes behind after cold backfill.
+		liveTip := !curEnd.Before(time.Now().UTC().Add(-2 * time.Minute))
+		batch, err := c.candles(ctx, marketID, resolution, start.UnixMilli(), curEnd.UnixMilli(), 500, liveTip)
 		if err != nil {
 			return all, err
 		}

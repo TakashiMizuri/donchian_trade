@@ -48,6 +48,7 @@ type Engine struct {
 	pending     map[string][]pendingClosed
 	lagRing     []LagSample
 	lagLast     LagSample
+	lastSnapAt  time.Time
 	wsOK        bool
 	wsErr       string
 	started     time.Time
@@ -434,21 +435,32 @@ func (e *Engine) processClosed(ctx context.Context, symbol string, bar strategy.
 	}
 	barCloseWall := time.Unix(bar.Time, 0).UTC().Add(tf)
 	detectLagMs := time.Since(barCloseWall).Milliseconds()
+	// More than 2 bars late: only advance history. Full strategy on a 4‑minute-old
+	// 1m bar is how we stayed permanently behind (and boot_catchup skewed shadows).
+	catchup := source == "boot_catchup" || source == "catchup" || detectLagMs > int64(2*tf/time.Millisecond)
 	if e.Flog != nil {
 		e.Flog.Event("bar_closed", map[string]any{
 			"symbol": symbol, "bar_time": bar.Time,
-			"detect_lag_ms": detectLagMs, "source": source,
+			"detect_lag_ms": detectLagMs, "source": source, "catchup": catchup,
 		})
 	}
 
-	// Hot path: update memory + decide + live order before SQLite shadows/persist.
 	e.mu.Lock()
-	e.recordDetectLag(symbol, bar.Time, detectLagMs, source)
+	if source != "boot_catchup" && source != "catchup" {
+		e.recordDetectLag(symbol, bar.Time, detectLagMs, source)
+	}
 	bars := append(e.bars[symbol], bar)
 	sort.Slice(bars, func(i, j int) bool { return bars[i].Time < bars[j].Time })
 	bars = uniqueBars(bars)
 	e.bars[symbol] = bars
 	e.lastBar[symbol] = bar.Time
+	if catchup {
+		e.mu.Unlock()
+		if err := e.Store.UpsertCandles(ctx, symbol, []strategy.Bar{bar}); err != nil {
+			e.alert(ctx, "error", "db", "candle persist: "+err.Error())
+		}
+		return
+	}
 	st := e.liveST[symbol]
 	ls5 := e.shadowLS5[symbol]
 	base := e.shadowBase[symbol]
@@ -459,25 +471,22 @@ func (e *Engine) processClosed(ctx context.Context, symbol string, bar strategy.
 	nextTime := bar.Time + int64(tf.Seconds())
 
 	act := strategy.Decide(bars, atr, i, nextOpen, nextTime, st, e.liveCfg)
-	// boot_catchup only advances history / shadows — never live orders on stale bars.
-	if source != "boot_catchup" {
-		switch act.Kind {
-		case strategy.ActionExitStop:
-			e.noteStopHit(ctx, symbol, &st, bars, act)
-		case strategy.ActionExitChannel, strategy.ActionExitTimeStop:
-			label := "channel"
-			if act.Kind == strategy.ActionExitTimeStop {
-				label = "tstop"
-			}
-			if err := e.executeExit(ctx, symbol, &st, bars, act, false); err != nil {
-				e.alert(ctx, "error", "exit", symbol+" "+label+" exit failed: "+err.Error())
-			}
-		case strategy.ActionEnter:
-			if e.skipNewEntries() {
-				e.alert(ctx, "warn", "verdict", symbol+" skip entry: verdict STOP (shadow continues)")
-			} else if err := e.executeEntry(ctx, symbol, &st, bars, act, barCloseWall, detectLagMs, source); err != nil {
-				e.alert(ctx, "error", "entry", symbol+" entry failed: "+err.Error())
-			}
+	switch act.Kind {
+	case strategy.ActionExitStop:
+		e.noteStopHit(ctx, symbol, &st, bars, act)
+	case strategy.ActionExitChannel, strategy.ActionExitTimeStop:
+		label := "channel"
+		if act.Kind == strategy.ActionExitTimeStop {
+			label = "tstop"
+		}
+		if err := e.executeExit(ctx, symbol, &st, bars, act, false); err != nil {
+			e.alert(ctx, "error", "exit", symbol+" "+label+" exit failed: "+err.Error())
+		}
+	case strategy.ActionEnter:
+		if e.skipNewEntries() {
+			e.alert(ctx, "warn", "verdict", symbol+" skip entry: verdict STOP (shadow continues)")
+		} else if err := e.executeEntry(ctx, symbol, &st, bars, act, barCloseWall, detectLagMs, source); err != nil {
+			e.alert(ctx, "error", "entry", symbol+" entry failed: "+err.Error())
 		}
 	}
 
@@ -500,8 +509,27 @@ func (e *Engine) processClosed(ctx context.Context, symbol string, bar strategy.
 	e.shadowLS5[symbol] = ls5
 	e.shadowBase[symbol] = base
 	e.mu.Unlock()
-	e.snapshotBooks(ctx, "bar")
+	e.maybeSnapshotBooks(ctx, "bar")
 	e.maybeDailyReport(ctx, bar.Time)
+}
+
+// maybeSnapshotBooks throttles curve/report snapshots. On 1m, full ComputeReport
+// every bar kept the busy lock hot and prevented tip catch-up.
+func (e *Engine) maybeSnapshotBooks(ctx context.Context, reason string) {
+	if reason == "bar" {
+		e.mu.Lock()
+		minGap := 30 * time.Second
+		if e.Cfg.Timeframe > minGap {
+			minGap = e.Cfg.Timeframe
+		}
+		if !e.lastSnapAt.IsZero() && time.Since(e.lastSnapAt) < minGap {
+			e.mu.Unlock()
+			return
+		}
+		e.lastSnapAt = time.Now()
+		e.mu.Unlock()
+	}
+	e.snapshotBooks(ctx, reason)
 }
 
 func candleIn(bars []strategy.Bar, t int64) bool {
@@ -1013,11 +1041,23 @@ func (e *Engine) pollClosedBars(ctx context.Context, expectedClosed int64, sourc
 		if nextOpen == 0 {
 			nextOpen = e.LastPrice(sym)
 		}
+		var closed []strategy.Bar
 		for _, b := range kl {
-			if b.Time >= cutoff {
-				continue
+			if b.Time < cutoff {
+				closed = append(closed, b)
 			}
-			e.HandleClosed(ctx, sym, b, nextOpen, source)
+		}
+		sort.Slice(closed, func(i, j int) bool { return closed[i].Time < closed[j].Time })
+		for i, b := range closed {
+			// Intermediates: advance lastBar only. Full strategy solely on the tip bar.
+			src := source
+			if i < len(closed)-1 {
+				src = "boot_catchup"
+				if source != "boot_catchup" {
+					src = "catchup"
+				}
+			}
+			e.HandleClosed(ctx, sym, b, nextOpen, src)
 		}
 	}
 	if expectedClosed <= 0 {

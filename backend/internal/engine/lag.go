@@ -46,8 +46,8 @@ type LagStatsSoft struct {
 }
 
 func (e *Engine) recordDetectLag(symbol string, barTime, detectLagMs int64, source string) {
-	// boot_catchup replays stale bars on purpose — do not poison the dashboard.
-	if source == "boot_catchup" {
+	// Catch-up paths replay stale bars on purpose — do not poison the dashboard.
+	if source == "boot_catchup" || source == "catchup" {
 		return
 	}
 	if e.lagRing == nil {
