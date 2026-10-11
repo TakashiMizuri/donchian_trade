@@ -33,6 +33,10 @@ func VolPctAt(bars []Bar, j, volBars int) (float64, bool) {
 //	vol_pct[j] = std(close[j-volBars+1..j]) / close[j]
 //	rank_input[j] = vol_pct[j-1]          // shift(1)
 //	vol_rank[i] = percentile_rank(rank_input[i] among [i-lookback+1 .. i])
+//
+// Complexity is O(volBars + lookback) via a sliding sum/sumsq — not
+// O(volBars*lookback). The naive form made 1m (1200/60000) hold busy for
+// hundreds of ms×N books and missed minute boundaries.
 func VolRankAt(bars []Bar, i, volBars, lookback int) (float64, bool) {
 	if lookback < 2 || volBars < 2 || i < 0 || i >= len(bars) {
 		return 0, false
@@ -43,13 +47,40 @@ func VolRankAt(bars []Bar, i, volBars, lookback int) (float64, bool) {
 	if i < minI {
 		return 0, false
 	}
+	// vol_pct indices p ∈ [i-lookback, i-1] (= rank_input for j ∈ [i-lookback+1, i]).
+	p0 := i - lookback
+	start := p0 - volBars + 1
+	if start < 0 {
+		return 0, false
+	}
+	n := float64(volBars)
+	var sum, sumsq float64
+	for k := start; k <= p0; k++ {
+		c := bars[k].Close
+		sum += c
+		sumsq += c * c
+	}
 	window := make([]float64, 0, lookback)
-	for j := i - lookback + 1; j <= i; j++ {
-		vp, ok := VolPctAt(bars, j-1, volBars)
-		if !ok {
+	for p := p0; p <= i-1; p++ {
+		c := bars[p].Close
+		if c == 0 || math.IsNaN(c) {
 			return 0, false
 		}
-		window = append(window, vp)
+		vari := (sumsq - sum*sum/n) / (n - 1)
+		if vari < 0 {
+			vari = 0
+		}
+		window = append(window, math.Sqrt(vari)/c)
+		if p == i-1 {
+			break
+		}
+		old := bars[start].Close
+		sum -= old
+		sumsq -= old * old
+		start++
+		next := bars[p+1].Close
+		sum += next
+		sumsq += next * next
 	}
 	v := window[len(window)-1]
 	return percentileRankLE(window, v), true

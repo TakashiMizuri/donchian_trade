@@ -6,6 +6,7 @@ import {
   Mismatch,
   Status,
   api,
+  fmtLagMs,
   fmtTime,
   fmtUsd,
   fmtUptime,
@@ -84,8 +85,128 @@ export function HealthTab({ status, events, mismatches, cashFlows, daily, busy, 
     return k === "ws" || k === "risk" || k === "verdict" || m.includes("reconcile") || m.includes("mismatch");
   });
 
+  const lag = status.candle_lag;
+  const lagSamples = lag?.samples ?? [];
+  const bySource = lag?.by_source ?? {};
+  const sourceLine = Object.entries(bySource)
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${k} ${v}`)
+    .join(" · ");
+
   return (
     <div className="flex flex-col gap-4">
+      <Card>
+        <CardHeader>
+          <CardTitle>Лаг детекта свечей</CardTitle>
+          <CardDescription>
+            Время от закрытия бара до обработки ботом. Норма: медиана &lt; 5 с, последний &lt; 15 с. На 1m баг давал
+            ~180–230 с на каждой свече.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          {!lag || lag.n === 0 ? (
+            <QuietEmpty title="Пока нет замеров" text="Появятся после первого закрытого бара после старта." />
+          ) : (
+            <>
+              {lag.alert ? (
+                <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  {lag.alert}
+                </div>
+              ) : (
+                <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm">
+                  Лаг в норме.
+                </div>
+              )}
+              <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
+                <Meta k="Последний" v={fmtLagMs(lag.last_ms)} />
+                <Meta k="Медиана" v={fmtLagMs(lag.median_ms)} />
+                <Meta k="Средний" v={fmtLagMs(lag.mean_ms)} />
+                <Meta k="p90" v={fmtLagMs(lag.p90_ms)} />
+                <Meta k="Макс" v={fmtLagMs(lag.max_ms)} />
+                <Meta k="Выборка" v={`${lag.n} свечей (ring)`} />
+                <Meta k="≥5 с" v={`${lag.gt_5s_pct.toFixed(0)}%`} />
+                <Meta k="≥30 с" v={`${lag.gt_30s_pct.toFixed(0)}%`} />
+                <Meta k="≥60 с" v={`${lag.gt_60s_pct.toFixed(0)}%`} />
+                <Meta k="Источники" v={sourceLine || "—"} />
+              </div>
+              {lag.per_symbol && Object.keys(lag.per_symbol).length > 0 ? (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Рынок</TableHead>
+                      <TableHead>n</TableHead>
+                      <TableHead>Последний</TableHead>
+                      <TableHead>Медиана</TableHead>
+                      <TableHead>p90</TableHead>
+                      <TableHead>Макс</TableHead>
+                      <TableHead>Статус</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {Object.entries(lag.per_symbol).map(([sym, s]) => (
+                      <TableRow key={sym}>
+                        <TableCell className="font-medium">{sym}</TableCell>
+                        <TableCell className="tabular-nums">{s.n}</TableCell>
+                        <TableCell className={cn("tabular-nums", !s.healthy && "text-destructive")}>
+                          {fmtLagMs(s.last_ms)}
+                        </TableCell>
+                        <TableCell className="tabular-nums">{fmtLagMs(s.median_ms)}</TableCell>
+                        <TableCell className="tabular-nums">{fmtLagMs(s.p90_ms)}</TableCell>
+                        <TableCell className="tabular-nums">{fmtLagMs(s.max_ms)}</TableCell>
+                        <TableCell>
+                          <Badge variant={s.healthy ? "secondary" : "destructive"}>
+                            {s.healthy ? "ок" : "плохо"}
+                          </Badge>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              ) : null}
+              <div>
+                <div className="mb-2 text-sm font-medium">Последние свечи</div>
+                {lagSamples.length === 0 ? (
+                  <QuietEmpty title="Пусто" text="" />
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Обнаружено</TableHead>
+                        <TableHead>Рынок</TableHead>
+                        <TableHead>Бар (UTC)</TableHead>
+                        <TableHead>Лаг</TableHead>
+                        <TableHead>Источник</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {lagSamples.map((s, i) => (
+                        <TableRow key={`${s.symbol}-${s.bar_time}-${i}`}>
+                          <TableCell className="text-muted-foreground">{fmtTime(s.detected_at)}</TableCell>
+                          <TableCell>{s.symbol}</TableCell>
+                          <TableCell>{fmtTime(s.bar_time)}</TableCell>
+                          <TableCell
+                            className={cn(
+                              "tabular-nums",
+                              s.detect_lag_ms >= 15000 && "font-medium text-destructive",
+                              s.detect_lag_ms >= 5000 && s.detect_lag_ms < 15000 && "text-amber-600",
+                            )}
+                          >
+                            {fmtLagMs(s.detect_lag_ms)}
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="outline">{s.source || "—"}</Badge>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
+              </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
       <Card>
         <CardHeader>
           <CardTitle>Состояние</CardTitle>

@@ -1,9 +1,46 @@
+export type LagSample = {
+  symbol: string;
+  bar_time: number;
+  detect_lag_ms: number;
+  source: string;
+  detected_at: number;
+};
+
+export type LagStatsSoft = {
+  n: number;
+  last_ms: number;
+  median_ms: number;
+  p90_ms: number;
+  max_ms: number;
+  mean_ms: number;
+  healthy: boolean;
+};
+
+export type LagStats = {
+  n: number;
+  last_ms: number;
+  median_ms: number;
+  p90_ms: number;
+  max_ms: number;
+  mean_ms: number;
+  gt_5s_pct: number;
+  gt_30s_pct: number;
+  gt_60s_pct: number;
+  by_source: Record<string, number>;
+  healthy: boolean;
+  alert?: string;
+  samples: LagSample[];
+  per_symbol?: Record<string, LagStatsSoft>;
+};
+
 export type SymbolSnap = {
   symbol: string;
   market_id: number;
   last_bar_time: number;
   last_price: number;
   bars: number;
+  last_detect_lag_ms?: number;
+  last_detect_source?: string;
   position: string;
   entry: number;
   stop: number;
@@ -85,9 +122,20 @@ export type Status = {
   go_live_ts: number;
   available: number;
   last_error: string;
+  candle_lag?: LagStats;
   symbols: SymbolSnap[];
   report: Report;
 };
+
+export function fmtLagMs(ms: number | undefined | null): string {
+  if (ms == null || Number.isNaN(ms)) return "—";
+  if (Math.abs(ms) < 1000) return `${Math.round(ms)} мс`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(s < 10 ? 2 : 1)} с`;
+  const m = Math.floor(s / 60);
+  const rem = s - m * 60;
+  return `${m}м ${rem.toFixed(0)}с`;
+}
 
 export type Trade = {
   id: number;

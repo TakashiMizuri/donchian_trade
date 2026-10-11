@@ -18,6 +18,12 @@ import (
 	"donchian.trade/bot/internal/telemetry"
 )
 
+type pendingClosed struct {
+	bar      strategy.Bar
+	nextOpen float64
+	source   string
+}
+
 type Engine struct {
 	Cfg     *config.Config
 	Store   *store.Store
@@ -39,6 +45,9 @@ type Engine struct {
 	lastPrice   map[string]float64
 	lastBar     map[string]int64
 	busy        map[string]bool
+	pending     map[string][]pendingClosed
+	lagRing     []LagSample
+	lagLast     LagSample
 	wsOK        bool
 	wsErr       string
 	started     time.Time
@@ -82,6 +91,7 @@ func New(cfg *config.Config, st *store.Store, httpc *lighter.HTTPClient, signer 
 		bars: map[string][]strategy.Bar{}, liveST: map[string]strategy.State{},
 		shadowLS5: map[string]strategy.State{}, shadowBase: map[string]strategy.State{},
 		lastPrice: map[string]float64{}, lastBar: map[string]int64{}, busy: map[string]bool{},
+		pending: map[string][]pendingClosed{},
 		entryIdx: map[string]int64{}, slIdx: map[string]int64{},
 		fundingBasis: map[string]float64{}, fundingLast: map[string]float64{},
 		alertAt: map[string]time.Time{},
@@ -270,6 +280,7 @@ func (e *Engine) Bootstrap(ctx context.Context) error {
 	e.snapshotBooks(ctx, "boot")
 	e.maybeMissedDaily(ctx)
 	_ = e.Store.PruneBarLogs(ctx, time.Now().Add(-120*24*time.Hour).Unix())
+	e.catchUpTip(ctx, tf)
 	if e.Flog != nil {
 		mids := make([]uint16, 0, len(e.Cfg.Symbols))
 		for _, sym := range e.Cfg.Symbols {
@@ -336,28 +347,60 @@ func (e *Engine) OnLiveCandle(marketID uint16, closed *strategy.Bar, live strate
 	}
 }
 
+func (e *Engine) enqueueClosed(symbol string, bar strategy.Bar, nextOpen float64, source string) {
+	if bar.Time <= e.lastBar[symbol] && candleIn(e.bars[symbol], bar.Time) {
+		return
+	}
+	q := e.pending[symbol]
+	for i := range q {
+		if q[i].bar.Time == bar.Time {
+			q[i] = pendingClosed{bar: bar, nextOpen: nextOpen, source: source}
+			e.pending[symbol] = q
+			return
+		}
+	}
+	e.pending[symbol] = append(q, pendingClosed{bar: bar, nextOpen: nextOpen, source: source})
+	sort.Slice(e.pending[symbol], func(i, j int) bool {
+		return e.pending[symbol][i].bar.Time < e.pending[symbol][j].bar.Time
+	})
+}
+
 func (e *Engine) HandleClosed(ctx context.Context, symbol string, bar strategy.Bar, nextOpen float64, source string) {
 	if source == "" {
 		source = "ws"
 	}
-	e.mu.Lock()
-	if e.busy[symbol] {
-		e.mu.Unlock()
-		return
+	if nextOpen <= 0 {
+		nextOpen = bar.Close
 	}
-	if bar.Time <= e.lastBar[symbol] && candleIn(e.bars[symbol], bar.Time) {
-		// already processed this closed bar
+	e.mu.Lock()
+	e.enqueueClosed(symbol, bar, nextOpen, source)
+	if e.busy[symbol] {
 		e.mu.Unlock()
 		return
 	}
 	e.busy[symbol] = true
 	e.mu.Unlock()
-	defer func() {
-		e.mu.Lock()
-		e.busy[symbol] = false
-		e.mu.Unlock()
-	}()
 
+	for {
+		e.mu.Lock()
+		q := e.pending[symbol]
+		if len(q) == 0 {
+			e.busy[symbol] = false
+			e.mu.Unlock()
+			return
+		}
+		item := q[0]
+		e.pending[symbol] = q[1:]
+		if item.bar.Time <= e.lastBar[symbol] && candleIn(e.bars[symbol], item.bar.Time) {
+			e.mu.Unlock()
+			continue
+		}
+		e.mu.Unlock()
+		e.processClosed(ctx, symbol, item.bar, item.nextOpen, item.source)
+	}
+}
+
+func (e *Engine) processClosed(ctx context.Context, symbol string, bar strategy.Bar, nextOpen float64, source string) {
 	if nextOpen <= 0 {
 		nextOpen = bar.Close
 	}
@@ -376,6 +419,7 @@ func (e *Engine) HandleClosed(ctx context.Context, symbol string, bar strategy.B
 
 	// Hot path: update memory + decide + live order before SQLite shadows/persist.
 	e.mu.Lock()
+	e.recordDetectLag(symbol, bar.Time, detectLagMs, source)
 	bars := append(e.bars[symbol], bar)
 	sort.Slice(bars, func(i, j int) bool { return bars[i].Time < bars[j].Time })
 	bars = uniqueBars(bars)
@@ -900,7 +944,9 @@ func (e *Engine) PollClosedBars(ctx context.Context) {
 	e.pollClosedBars(ctx, 0, "reconcile")
 }
 
-// pollClosedBars fetches recent candles and feeds closed bars into HandleClosed.
+// pollClosedBars fetches a short tip of candles (like probe_candle_delay.py) and
+// feeds closed bars into HandleClosed. A 6h window + long WAF retries previously
+// froze end_timestamp and left 1m detect_lag stuck near ~180–200s.
 // If expectedClosed > 0, returns whether every symbol has already processed that bar
 // (via WS or a prior poll). HandleClosed is idempotent.
 func (e *Engine) pollClosedBars(ctx context.Context, expectedClosed int64, source string) bool {
@@ -913,22 +959,20 @@ func (e *Engine) pollClosedBars(ctx context.Context, expectedClosed int64, sourc
 		res = "1h"
 	}
 	cutoff := time.Now().UTC().Truncate(tf).Unix()
-	lookback := 6 * time.Hour
-	if lookback < 12*tf {
-		lookback = 12 * tf
+	lookback := 30 * time.Minute
+	if lookback < 15*tf {
+		lookback = 15 * tf
 	}
 	countBack := int(lookback/tf) + 2
 	if countBack < 12 {
 		countBack = 12
 	}
-	if countBack > 500 {
-		countBack = 500
+	if countBack > 200 {
+		countBack = 200
 	}
 	for _, sym := range e.Cfg.Symbols {
 		meta := e.Markets[sym]
-		end := time.Now()
-		start := end.Add(-lookback)
-		kl, err := e.HTTP.Candles(ctx, meta.MarketID, res, start.UnixMilli(), end.UnixMilli(), countBack)
+		kl, err := e.HTTP.CandlesTip(ctx, meta.MarketID, res, lookback, countBack)
 		if err != nil {
 			continue
 		}
@@ -955,6 +999,29 @@ func (e *Engine) pollClosedBars(ctx context.Context, expectedClosed int64, sourc
 	return e.haveClosedBar(expectedClosed)
 }
 
+// catchUpTip polls until the prior closed bar is ingested (or timeout).
+// Prevents starting live several minutes behind after a slow backfill.
+func (e *Engine) catchUpTip(ctx context.Context, tf time.Duration) {
+	if tf <= 0 {
+		tf = time.Hour
+	}
+	deadline := time.Now().Add(boundaryPollTimeoutFor(tf) + 15*time.Second)
+	for time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			return
+		}
+		expected := time.Now().UTC().Truncate(tf).Add(-tf).Unix()
+		if e.pollClosedBars(ctx, expected, "boot_catchup") {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(boundaryPollInterval):
+		}
+	}
+}
+
 func (e *Engine) haveClosedBar(barTime int64) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -966,13 +1033,26 @@ func (e *Engine) haveClosedBar(barTime int64) bool {
 	return len(e.Cfg.Symbols) > 0
 }
 
-// After each UTC bar boundary, poll REST every 200ms until the closed bar is seen
-// (or timeout). Complements trade-driven WS so quiet markets do not fall through
-// to the 15s reconcile ticker (~8s median lag).
-const (
-	boundaryPollInterval = 200 * time.Millisecond
-	boundaryPollTimeout  = 5 * time.Second
-)
+// After each UTC bar boundary, poll REST until the closed bar is seen (or timeout).
+// Complements trade-driven WS so quiet markets do not fall through to reconcile.
+// Interval matches HTTP minInterval pacing; timeout scales with TF (1m needs longer).
+const boundaryPollInterval = 400 * time.Millisecond
+
+func boundaryPollTimeoutFor(tf time.Duration) time.Duration {
+	t := 15 * time.Second
+	if tf <= time.Minute {
+		t = 45 * time.Second
+	} else if tf <= 5*time.Minute {
+		t = 20 * time.Second
+	}
+	if max := tf - 5*time.Second; max > 0 && t > max {
+		t = max
+	}
+	if t < 5*time.Second {
+		t = 5 * time.Second
+	}
+	return t
+}
 
 // RunBoundaryPoll waits for each bar boundary, then polls until the prior bar is
 // ingested for all symbols. HandleClosed is idempotent if WS wins the race.
@@ -981,6 +1061,7 @@ func (e *Engine) RunBoundaryPoll(ctx context.Context) {
 	if tf <= 0 {
 		tf = time.Hour
 	}
+	timeout := boundaryPollTimeoutFor(tf)
 	for {
 		if ctx.Err() != nil {
 			return
@@ -995,7 +1076,7 @@ func (e *Engine) RunBoundaryPoll(ctx context.Context) {
 			}
 		}
 		expectedClosed := boundary.Add(-tf).Unix()
-		deadline := boundary.Add(boundaryPollTimeout)
+		deadline := boundary.Add(timeout)
 		attempt := 0
 		for {
 			if ctx.Err() != nil {
@@ -1070,6 +1151,7 @@ type Snapshot struct {
 	GoLiveTS             int64            `json:"go_live_ts"`
 	Available            float64          `json:"available"`
 	LastError            string           `json:"last_error"`
+	CandleLag            LagStats         `json:"candle_lag"`
 	Symbols              []SymbolSnap     `json:"symbols"`
 	Report               telemetry.Report `json:"report"`
 }
@@ -1080,6 +1162,8 @@ type SymbolSnap struct {
 	LastBarTime     int64   `json:"last_bar_time"`
 	LastPrice       float64 `json:"last_price"`
 	Bars            int     `json:"bars"`
+	LastDetectLagMs int64   `json:"last_detect_lag_ms"`
+	LastDetectSrc   string  `json:"last_detect_source"`
 	Position        string  `json:"position"`
 	Entry           float64 `json:"entry"`
 	Stop            float64 `json:"stop"`
@@ -1141,8 +1225,16 @@ func (e *Engine) Snapshot(ctx context.Context) Snapshot {
 		GoLiveTS:             g.GoLiveTS,
 		Available:            avail,
 		LastError:            g.LastError,
+		CandleLag:            e.candleLagStats(),
 		Report:               rep,
 		Symbols:              make([]SymbolSnap, 0, len(e.Cfg.Symbols)),
+	}
+	lastLagBySym := map[string]LagSample{}
+	for i := len(e.lagRing) - 1; i >= 0; i-- {
+		s := e.lagRing[i]
+		if _, ok := lastLagBySym[s.Symbol]; !ok {
+			lastLagBySym[s.Symbol] = s
+		}
 	}
 	for _, sym := range e.Cfg.Symbols {
 		st := e.liveST[sym]
@@ -1162,6 +1254,10 @@ func (e *Engine) Snapshot(ctx context.Context) Snapshot {
 			ShadowTwin:      posLabel(sh),
 			ShadowBaseline:  posLabel(base),
 			ShadowConsecLS5: 0,
+		}
+		if lg, ok := lastLagBySym[sym]; ok {
+			item.LastDetectLagMs = lg.DetectLagMs
+			item.LastDetectSrc = lg.Source
 		}
 		if st.Position != nil {
 			item.Position = string(st.Position.Direction)

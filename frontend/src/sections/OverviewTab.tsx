@@ -7,6 +7,7 @@ import {
   Status,
   Trade,
   fmtBps,
+  fmtLagMs,
   fmtPct,
   fmtPx,
   fmtQty,
@@ -72,6 +73,8 @@ export function OverviewTab({ status, equity, stats, trades, mismatches }: Props
   }, [liveTrades]);
 
   const todayNotes = buildTodayNotes(status, mismatches, activeVerdict);
+  const lag = status.candle_lag;
+  const lagBad = lag != null && lag.n > 0 && !lag.healthy;
 
   return (
     <div className="flex flex-col gap-4">
@@ -79,6 +82,16 @@ export function OverviewTab({ status, equity, stats, trades, mismatches }: Props
         <AlertTitle>{verdict.title}</AlertTitle>
         <AlertDescription>{verdict.body}</AlertDescription>
       </Alert>
+
+      {lagBad ? (
+        <Alert variant="destructive">
+          <AlertTitle>Лаг детекта свечей</AlertTitle>
+          <AlertDescription>
+            {lag?.alert || "Свечи доходят слишком поздно."} Последний {fmtLagMs(lag?.last_ms)}, медиана{" "}
+            {fmtLagMs(lag?.median_ms)}, p90 {fmtLagMs(lag?.p90_ms)}. Подробности — вкладка «Здоровье».
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
       <Card>
         <CardHeader>
@@ -297,6 +310,7 @@ export function OverviewTab({ status, equity, stats, trades, mismatches }: Props
                 <TableRow>
                   <TableHead>Рынок</TableHead>
                   <TableHead>Цена</TableHead>
+                  <TableHead>Лаг свечи</TableHead>
                   <TableHead>Live</TableHead>
                   <TableHead>Тень</TableHead>
                   <TableHead>Baseline</TableHead>
@@ -310,6 +324,17 @@ export function OverviewTab({ status, equity, stats, trades, mismatches }: Props
                   <TableRow key={s.symbol}>
                     <TableCell className="font-medium">{s.symbol}</TableCell>
                     <TableCell>{fmtPx(s.last_price)}</TableCell>
+                    <TableCell
+                      className={cn(
+                        "tabular-nums",
+                        (s.last_detect_lag_ms ?? 0) >= 15000 && "text-destructive font-medium",
+                      )}
+                    >
+                      {fmtLagMs(s.last_detect_lag_ms)}
+                      {s.last_detect_source ? (
+                        <span className="ml-1 text-xs text-muted-foreground">{s.last_detect_source}</span>
+                      ) : null}
+                    </TableCell>
                     <TableCell>{sideLabel(s.position)}</TableCell>
                     <TableCell>{sideLabel(s.shadow_ls5)}</TableCell>
                     <TableCell>{sideLabel(s.shadow_baseline)}</TableCell>
@@ -382,6 +407,20 @@ export function OverviewTab({ status, equity, stats, trades, mismatches }: Props
 
 function buildTodayNotes(status: Status, mismatches: Mismatch[], verdict: string): string[] {
   const lines: string[] = [];
+  const lag = status.candle_lag;
+  if (lag && lag.n > 0) {
+    if (lag.healthy) {
+      lines.push(
+        `Лаг детекта свечей в норме: последний ${fmtLagMs(lag.last_ms)}, медиана ${fmtLagMs(lag.median_ms)} (n=${lag.n}).`,
+      );
+    } else {
+      lines.push(
+        `Лаг детекта свечей плохой: последний ${fmtLagMs(lag.last_ms)}, медиана ${fmtLagMs(lag.median_ms)} — смотри «Здоровье».`,
+      );
+    }
+  } else {
+    lines.push("Лаг детекта свечей ещё не измерен — подожди закрытия бара.");
+  }
   if (!status.ws_connected) {
     lines.push(`Нет WebSocket${status.ws_error ? `: ${status.ws_error}` : ""}. Бот может опираться на REST.`);
   } else {

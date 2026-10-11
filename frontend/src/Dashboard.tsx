@@ -12,6 +12,7 @@ import {
   Status,
   Trade,
   api,
+  fmtLagMs,
   getInstanceId,
   setInstanceId,
 } from "./api";
@@ -128,6 +129,12 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
             </select>
           ) : null}
           {status ? <VerdictBadge verdict={activeVerdict} /> : null}
+          {status?.candle_lag && status.candle_lag.n > 0 ? (
+            <Badge variant={status.candle_lag.healthy ? "secondary" : "destructive"}>
+              лаг {fmtLagMs(status.candle_lag.last_ms)}
+              {!status.candle_lag.healthy ? "!" : ""}
+            </Badge>
+          ) : null}
           <Badge variant={status?.ws_connected ? "secondary" : "destructive"}>
             {status?.ws_connected ? "стрим" : "нет стрима"}
           </Badge>

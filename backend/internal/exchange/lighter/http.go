@@ -297,32 +297,134 @@ func candleTimeSec(t int64) int64 {
 }
 
 func (c *HTTPClient) Candles(ctx context.Context, marketID uint16, resolution string, startMs, endMs int64, countBack int) ([]strategy.Bar, error) {
-	q := url.Values{}
-	q.Set("market_id", strconv.Itoa(int(marketID)))
-	q.Set("resolution", resolution)
-	q.Set("start_timestamp", strconv.FormatInt(startMs, 10))
-	q.Set("end_timestamp", strconv.FormatInt(endMs, 10))
-	q.Set("count_back", strconv.Itoa(countBack))
-	b, err := c.get(ctx, "/api/v1/candles", q, false)
+	return c.candles(ctx, marketID, resolution, startMs, endMs, countBack, false)
+}
+
+// CandlesTip fetches a short recent window for live closed-bar detection.
+// end_timestamp is refreshed on every retry so a WAF/429 wait cannot return a
+// tip frozen minutes in the past (that stuck 1m detect_lag near ~180–200s).
+func (c *HTTPClient) CandlesTip(ctx context.Context, marketID uint16, resolution string, lookback time.Duration, countBack int) ([]strategy.Bar, error) {
+	if lookback <= 0 {
+		lookback = 30 * time.Minute
+	}
+	if countBack < 4 {
+		countBack = 4
+	}
+	end := time.Now().UnixMilli()
+	start := end - lookback.Milliseconds()
+	return c.candles(ctx, marketID, resolution, start, end, countBack, true)
+}
+
+func (c *HTTPClient) candles(ctx context.Context, marketID uint16, resolution string, startMs, endMs int64, countBack int, liveTip bool) ([]strategy.Bar, error) {
+	span := endMs - startMs
+	if span < 0 {
+		span = 0
+	}
+	maxAttempts := 20
+	if liveTip {
+		// Fail fast — boundary loop will retry with a fresh "now".
+		maxAttempts = 4
+	}
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		end := endMs
+		start := startMs
+		if liveTip {
+			end = time.Now().UnixMilli()
+			start = end - span
+		}
+		q := url.Values{}
+		q.Set("market_id", strconv.Itoa(int(marketID)))
+		q.Set("resolution", resolution)
+		q.Set("start_timestamp", strconv.FormatInt(start, 10))
+		q.Set("end_timestamp", strconv.FormatInt(end, 10))
+		q.Set("count_back", strconv.Itoa(countBack))
+		b, err := c.getOnce(ctx, "/api/v1/candles", q, false)
+		if err != nil {
+			return nil, err
+		}
+		if retryableHTTP(b.status, b.body) {
+			wait := retryAfter(b.retryAfter, attempt, b.status, b.body)
+			if liveTip && wait > 2*time.Second {
+				wait = 2 * time.Second
+			}
+			lastErr = fmt.Errorf("GET /api/v1/candles: HTTP %d: %s", b.status, truncate(string(b.body), 200))
+			t := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return nil, ctx.Err()
+			case <-t.C:
+			}
+			continue
+		}
+		if b.status >= 400 {
+			return nil, fmt.Errorf("GET /api/v1/candles: HTTP %d: %s", b.status, truncate(string(b.body), 400))
+		}
+		var resp CandlesResp
+		if err := json.Unmarshal(b.body, &resp); err != nil {
+			return nil, err
+		}
+		out := make([]strategy.Bar, 0, len(resp.C))
+		for _, k := range resp.C {
+			out = append(out, strategy.Bar{
+				Time:   candleTimeSec(k.T),
+				Open:   k.O,
+				High:   k.H,
+				Low:    k.L,
+				Close:  k.C,
+				Volume: k.V,
+			})
+		}
+		return out, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("GET /api/v1/candles: rate limited")
+	}
+	return nil, lastErr
+}
+
+type httpResult struct {
+	status     int
+	body       []byte
+	retryAfter string
+}
+
+func (c *HTTPClient) getOnce(ctx context.Context, path string, q url.Values, auth bool) (httpResult, error) {
+	if err := c.pace(ctx); err != nil {
+		return httpResult{}, err
+	}
+	u := c.BaseURL + path
+	if len(q) > 0 {
+		u += "?" + q.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, err
+		return httpResult{}, err
 	}
-	var resp CandlesResp
-	if err := json.Unmarshal(b, &resp); err != nil {
-		return nil, err
+	if auth {
+		tok := c.AuthToken
+		if c.tokenFn != nil {
+			t, err := c.tokenFn(ctx)
+			if err != nil {
+				return httpResult{}, err
+			}
+			tok = t
+		}
+		if tok != "" {
+			req.Header.Set("Authorization", tok)
+		}
 	}
-	out := make([]strategy.Bar, 0, len(resp.C))
-	for _, k := range resp.C {
-		out = append(out, strategy.Bar{
-			Time:   candleTimeSec(k.T),
-			Open:   k.O,
-			High:   k.H,
-			Low:    k.L,
-			Close:  k.C,
-			Volume: k.V,
-		})
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return httpResult{}, err
 	}
-	return out, nil
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return httpResult{}, err
+	}
+	return httpResult{status: resp.StatusCode, body: body, retryAfter: resp.Header.Get("Retry-After")}, nil
 }
 
 func (c *HTTPClient) Backfill(ctx context.Context, marketID uint16, resolution string, bar time.Duration, from time.Time) ([]strategy.Bar, error) {
