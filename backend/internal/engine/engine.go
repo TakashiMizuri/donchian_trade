@@ -165,33 +165,57 @@ func (e *Engine) backfillSymbol(ctx context.Context, sym string, meta lighter.Ma
 	if err != nil {
 		return err
 	}
-	now := time.Now().UTC()
 	if len(existing) == 0 {
-		_, err := e.HTTP.BackfillRange(ctx, meta.MarketID, e.Cfg.Resolution, tf, from, now, upsert)
-		if err != nil {
+		until := time.Now().UTC()
+		if _, err := e.HTTP.BackfillRange(ctx, meta.MarketID, e.Cfg.Resolution, tf, from, until, upsert); err != nil {
 			return fmt.Errorf("backfill %s: %w", sym, err)
 		}
-		return nil
-	}
-	oldest := time.Unix(existing[0].Time, 0).UTC()
-	newest := time.Unix(existing[len(existing)-1].Time, 0).UTC()
-	// Resume older history first (partial 1m warmups often die mid-walk).
-	if oldest.After(from.Add(tf)) {
-		n, err := e.HTTP.BackfillRange(ctx, meta.MarketID, e.Cfg.Resolution, tf, from, oldest, upsert)
-		if err != nil {
-			return fmt.Errorf("backfill %s history: %w", sym, err)
+	} else {
+		oldest := time.Unix(existing[0].Time, 0).UTC()
+		newest := time.Unix(existing[len(existing)-1].Time, 0).UTC()
+		// Resume older history first (partial 1m warmups often die mid-walk).
+		if oldest.After(from.Add(tf)) {
+			n, err := e.HTTP.BackfillRange(ctx, meta.MarketID, e.Cfg.Resolution, tf, from, oldest, upsert)
+			if err != nil {
+				return fmt.Errorf("backfill %s history: %w", sym, err)
+			}
+			e.Log.Info("backfill history", "symbol", sym, "added", len(n), "from", from, "until", oldest)
 		}
-		e.Log.Info("backfill history", "symbol", sym, "added", len(n), "from", from, "until", oldest)
+		tipFrom := newest.Add(-2 * tf)
+		if tipFrom.Before(from) {
+			tipFrom = from
+		}
+		now := time.Now().UTC()
+		n, err := e.HTTP.BackfillRange(ctx, meta.MarketID, e.Cfg.Resolution, tf, tipFrom, now, upsert)
+		if err != nil {
+			return fmt.Errorf("backfill %s tip: %w", sym, err)
+		}
+		e.Log.Info("backfill tip", "symbol", sym, "added", len(n))
 	}
-	tipFrom := newest.Add(-2 * tf)
+	// Cold 1m walks take minutes; the first page's tip is stale by the time we
+	// finish. Always re-fetch a fresh tip pinned to time.Now().
+	return e.refreshTip(ctx, sym, meta, from, tf, upsert)
+}
+
+func (e *Engine) refreshTip(ctx context.Context, sym string, meta lighter.MarketMeta, from time.Time, tf time.Duration, upsert func([]strategy.Bar) error) error {
+	existing, err := e.Store.LoadCandles(ctx, sym)
+	if err != nil {
+		return err
+	}
+	tipNow := time.Now().UTC()
+	tipFrom := tipNow.Add(-15 * tf)
+	if len(existing) > 0 {
+		newest := time.Unix(existing[len(existing)-1].Time, 0).UTC()
+		tipFrom = newest.Add(-2 * tf)
+	}
 	if tipFrom.Before(from) {
 		tipFrom = from
 	}
-	n, err := e.HTTP.BackfillRange(ctx, meta.MarketID, e.Cfg.Resolution, tf, tipFrom, now, upsert)
+	n, err := e.HTTP.BackfillRange(ctx, meta.MarketID, e.Cfg.Resolution, tf, tipFrom, tipNow, upsert)
 	if err != nil {
-		return fmt.Errorf("backfill %s tip: %w", sym, err)
+		return fmt.Errorf("backfill %s tip refresh: %w", sym, err)
 	}
-	e.Log.Info("backfill tip", "symbol", sym, "added", len(n))
+	e.Log.Info("backfill tip refresh", "symbol", sym, "added", len(n), "until", tipNow.Format(time.RFC3339))
 	return nil
 }
 
@@ -435,22 +459,25 @@ func (e *Engine) processClosed(ctx context.Context, symbol string, bar strategy.
 	nextTime := bar.Time + int64(tf.Seconds())
 
 	act := strategy.Decide(bars, atr, i, nextOpen, nextTime, st, e.liveCfg)
-	switch act.Kind {
-	case strategy.ActionExitStop:
-		e.noteStopHit(ctx, symbol, &st, bars, act)
-	case strategy.ActionExitChannel, strategy.ActionExitTimeStop:
-		label := "channel"
-		if act.Kind == strategy.ActionExitTimeStop {
-			label = "tstop"
-		}
-		if err := e.executeExit(ctx, symbol, &st, bars, act, false); err != nil {
-			e.alert(ctx, "error", "exit", symbol+" "+label+" exit failed: "+err.Error())
-		}
-	case strategy.ActionEnter:
-		if e.skipNewEntries() {
-			e.alert(ctx, "warn", "verdict", symbol+" skip entry: verdict STOP (shadow continues)")
-		} else if err := e.executeEntry(ctx, symbol, &st, bars, act, barCloseWall, detectLagMs, source); err != nil {
-			e.alert(ctx, "error", "entry", symbol+" entry failed: "+err.Error())
+	// boot_catchup only advances history / shadows — never live orders on stale bars.
+	if source != "boot_catchup" {
+		switch act.Kind {
+		case strategy.ActionExitStop:
+			e.noteStopHit(ctx, symbol, &st, bars, act)
+		case strategy.ActionExitChannel, strategy.ActionExitTimeStop:
+			label := "channel"
+			if act.Kind == strategy.ActionExitTimeStop {
+				label = "tstop"
+			}
+			if err := e.executeExit(ctx, symbol, &st, bars, act, false); err != nil {
+				e.alert(ctx, "error", "exit", symbol+" "+label+" exit failed: "+err.Error())
+			}
+		case strategy.ActionEnter:
+			if e.skipNewEntries() {
+				e.alert(ctx, "warn", "verdict", symbol+" skip entry: verdict STOP (shadow continues)")
+			} else if err := e.executeEntry(ctx, symbol, &st, bars, act, barCloseWall, detectLagMs, source); err != nil {
+				e.alert(ctx, "error", "entry", symbol+" entry failed: "+err.Error())
+			}
 		}
 	}
 
@@ -1005,13 +1032,21 @@ func (e *Engine) catchUpTip(ctx context.Context, tf time.Duration) {
 	if tf <= 0 {
 		tf = time.Hour
 	}
-	deadline := time.Now().Add(boundaryPollTimeoutFor(tf) + 15*time.Second)
+	// 1m cold tip can be minutes stale after history walk; allow a long catch-up.
+	budget := 2 * time.Minute
+	if tf <= time.Minute {
+		budget = 10 * time.Minute
+	} else if tf <= 5*time.Minute {
+		budget = 3 * time.Minute
+	}
+	deadline := time.Now().Add(budget)
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return
 		}
 		expected := time.Now().UTC().Truncate(tf).Add(-tf).Unix()
 		if e.pollClosedBars(ctx, expected, "boot_catchup") {
+			e.Log.Info("boot catchup ok", "expected_closed", expected)
 			return
 		}
 		select {
@@ -1020,6 +1055,15 @@ func (e *Engine) catchUpTip(ctx context.Context, tf time.Duration) {
 		case <-time.After(boundaryPollInterval):
 		}
 	}
+	e.mu.Lock()
+	var behind []string
+	expected := time.Now().UTC().Truncate(tf).Add(-tf).Unix()
+	for _, sym := range e.Cfg.Symbols {
+		lag := expected - e.lastBar[sym]
+		behind = append(behind, fmt.Sprintf("%s=%ds", sym, lag))
+	}
+	e.mu.Unlock()
+	e.Log.Warn("boot catchup incomplete", "expected_closed", expected, "behind", behind)
 }
 
 func (e *Engine) haveClosedBar(barTime int64) bool {
