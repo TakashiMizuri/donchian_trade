@@ -45,7 +45,13 @@ func (w *WS) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		started := time.Now()
 		err := w.once(ctx)
+		// A session that actually stayed up resets the flap backoff.
+		// Otherwise one 429 storm leaves every later reconnect waiting 30s.
+		if time.Since(started) >= 30*time.Second {
+			backoff = time.Second
+		}
 		if w.OnState != nil {
 			w.OnState(false, errString(err))
 		}
@@ -56,6 +62,19 @@ func (w *WS) Run(ctx context.Context) error {
 		}
 		if backoff < 30*time.Second {
 			backoff *= 2
+		}
+	}
+}
+
+func pingConn(ctx context.Context, conn *websocket.Conn) {
+	t := time.NewTicker(20 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			_ = conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(5*time.Second))
 		}
 	}
 }
@@ -91,23 +110,9 @@ func (w *WS) once(ctx context.Context) error {
 		_ = conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 		return nil
 	})
-	go func() {
-		t := time.NewTicker(20 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				w.mu.Lock()
-				c := w.conn
-				w.mu.Unlock()
-				if c != nil {
-					_ = c.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(5*time.Second))
-				}
-			}
-		}
-	}()
+	pingCtx, pingCancel := context.WithCancel(ctx)
+	defer pingCancel()
+	go pingConn(pingCtx, conn)
 	for {
 		select {
 		case <-ctx.Done():

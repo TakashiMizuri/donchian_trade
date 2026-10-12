@@ -22,8 +22,30 @@ func TestHaveClosedBar(t *testing.T) {
 	}
 }
 
+func TestNextBarBoundaryEveryBar(t *testing.T) {
+	tf := 5 * time.Minute
+	// Just after the 20:35 poll returns, the next close is 20:40 — not 20:45.
+	afterPoll := time.Date(2026, 10, 12, 20, 35, 0, int(300*time.Millisecond), time.UTC)
+	next := nextBarBoundary(afterPoll, tf)
+	want := time.Date(2026, 10, 12, 20, 40, 0, 0, time.UTC)
+	if !next.Equal(want) {
+		t.Fatalf("next boundary %s, want %s", next, want)
+	}
+	// Walking close-to-close hits every 5m mark. The old loop waited until
+	// `next` and then applied Truncate+period again, landing 10m ahead.
+	cur := time.Date(2026, 10, 12, 20, 0, 0, int(200*time.Millisecond), time.UTC)
+	for i := 0; i < 6; i++ {
+		got := nextBarBoundary(cur, tf)
+		cur = got.Add(200 * time.Millisecond)
+		want := time.Date(2026, 10, 12, 20, 5*(i+1), 0, 0, time.UTC)
+		if !got.Equal(want) {
+			t.Fatalf("step %d got %s want %s", i, got, want)
+		}
+	}
+}
+
 func TestBoundaryPollConstants(t *testing.T) {
-	if boundaryPollInterval != 400*time.Millisecond {
+	if boundaryPollInterval != 200*time.Millisecond {
 		t.Fatalf("interval %v", boundaryPollInterval)
 	}
 	t1m := boundaryPollTimeoutFor(time.Minute)

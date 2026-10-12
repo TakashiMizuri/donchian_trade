@@ -1025,12 +1025,31 @@ func (e *Engine) pollClosedBars(ctx context.Context, expectedClosed int64, sourc
 	if countBack > 200 {
 		countBack = 200
 	}
-	for _, sym := range e.Cfg.Symbols {
-		meta := e.Markets[sym]
-		kl, err := e.HTTP.CandlesTip(ctx, meta.MarketID, res, lookback, countBack)
-		if err != nil {
+	// Fetch every symbol at once. The 300ms backfill pacer used to run them
+	// back-to-back, so ETH's close always landed a full round-trip after BTC.
+	type tip struct {
+		sym string
+		kl  []strategy.Bar
+		err error
+	}
+	got := make([]tip, len(e.Cfg.Symbols))
+	var wg sync.WaitGroup
+	for i, sym := range e.Cfg.Symbols {
+		wg.Add(1)
+		go func(i int, sym string) {
+			defer wg.Done()
+			meta := e.Markets[sym]
+			kl, err := e.HTTP.CandlesTip(ctx, meta.MarketID, res, lookback, countBack)
+			got[i] = tip{sym: sym, kl: kl, err: err}
+		}(i, sym)
+	}
+	wg.Wait()
+	for _, r := range got {
+		if r.err != nil {
 			continue
 		}
+		sym := r.sym
+		kl := r.kl
 		var nextOpen float64
 		for _, b := range kl {
 			if b.Time >= cutoff && b.Open > 0 {
@@ -1119,8 +1138,18 @@ func (e *Engine) haveClosedBar(barTime int64) bool {
 
 // After each UTC bar boundary, poll REST until the closed bar is seen (or timeout).
 // Complements trade-driven WS so quiet markets do not fall through to reconcile.
-// Interval matches HTTP minInterval pacing; timeout scales with TF (1m needs longer).
-const boundaryPollInterval = 400 * time.Millisecond
+// Gap between tip polls after a bar close. Timeout scales with TF (1m needs longer).
+const boundaryPollInterval = 200 * time.Millisecond
+
+// nextBarBoundary is the soonest close strictly after now.
+// Callers must not wait once more after polling: Truncate+period from a
+// time already on the following boundary skips a whole bar.
+func nextBarBoundary(now time.Time, tf time.Duration) time.Time {
+	if tf <= 0 {
+		tf = time.Hour
+	}
+	return now.UTC().Truncate(tf).Add(tf)
+}
 
 func boundaryPollTimeoutFor(tf time.Duration) time.Duration {
 	t := 15 * time.Second
@@ -1138,6 +1167,52 @@ func boundaryPollTimeoutFor(tf time.Duration) time.Duration {
 	return t
 }
 
+// waitBoundary sleeps until the bar close, but opens the TLS connection about
+// a second early. Idle keep-alive dies in 90s, so a 5m bot otherwise pays a
+// fresh handshake on the poll that is supposed to be the fast one.
+func (e *Engine) waitBoundary(ctx context.Context, boundary time.Time) {
+	warmAt := boundary.Add(-time.Second)
+	if wait := time.Until(warmAt); wait > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+	}
+	if remain := time.Until(boundary); remain > 50*time.Millisecond {
+		budget := 700 * time.Millisecond
+		if remain-20*time.Millisecond < budget {
+			budget = remain - 20*time.Millisecond
+		}
+		warmCtx, cancel := context.WithTimeout(ctx, budget)
+		e.warmCandleConn(warmCtx)
+		cancel()
+	}
+	if wait := time.Until(boundary); wait > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+	}
+}
+
+func (e *Engine) warmCandleConn(ctx context.Context) {
+	if e.HTTP == nil || e.Cfg == nil || len(e.Cfg.Symbols) == 0 {
+		return
+	}
+	sym := e.Cfg.Symbols[0]
+	meta, ok := e.Markets[sym]
+	if !ok {
+		return
+	}
+	res := e.Cfg.Resolution
+	if res == "" {
+		res = "1m"
+	}
+	_, _ = e.HTTP.CandlesTip(ctx, meta.MarketID, res, 2*time.Minute, 4)
+}
+
 // RunBoundaryPoll waits for each bar boundary, then polls until the prior bar is
 // ingested for all symbols. HandleClosed is idempotent if WS wins the race.
 func (e *Engine) RunBoundaryPoll(ctx context.Context) {
@@ -1151,13 +1226,10 @@ func (e *Engine) RunBoundaryPoll(ctx context.Context) {
 			return
 		}
 		now := time.Now().UTC()
-		boundary := now.Truncate(tf).Add(tf)
-		if wait := time.Until(boundary); wait > 0 {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(wait):
-			}
+		boundary := nextBarBoundary(now, tf)
+		e.waitBoundary(ctx, boundary)
+		if ctx.Err() != nil {
+			return
 		}
 		expectedClosed := boundary.Add(-tf).Unix()
 		deadline := boundary.Add(timeout)
@@ -1168,7 +1240,11 @@ func (e *Engine) RunBoundaryPoll(ctx context.Context) {
 			}
 			attempt++
 			offsetMs := time.Since(boundary).Milliseconds()
-			allSeen := e.pollClosedBars(ctx, expectedClosed, "boundary")
+			// Deadline is on the fetch too. Otherwise one 20s×retry candle call
+			// runs past the next bar, and the late batch skips strategy on the bar we missed.
+			attemptCtx, cancel := context.WithDeadline(ctx, deadline)
+			allSeen := e.pollClosedBars(attemptCtx, expectedClosed, "boundary")
+			cancel()
 			if e.Flog != nil {
 				e.Flog.Event("boundary_poll", map[string]any{
 					"attempt":         attempt,
@@ -1187,15 +1263,9 @@ func (e *Engine) RunBoundaryPoll(ctx context.Context) {
 			case <-time.After(boundaryPollInterval):
 			}
 		}
-		// Align to the following boundary.
-		next := time.Now().UTC().Truncate(tf).Add(tf)
-		if wait := time.Until(next); wait > 0 {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(wait):
-			}
-		}
+		// The top of the loop already waits until the next boundary.
+		// A second wait here skips every other bar: on 5m that left half the
+		// closes to the 15s reconcile ticker (~10s detect lag).
 	}
 }
 

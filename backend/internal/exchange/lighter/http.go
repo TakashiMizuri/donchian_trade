@@ -339,7 +339,9 @@ func (c *HTTPClient) candles(ctx context.Context, marketID uint16, resolution st
 		q.Set("start_timestamp", strconv.FormatInt(start, 10))
 		q.Set("end_timestamp", strconv.FormatInt(end, 10))
 		q.Set("count_back", strconv.Itoa(countBack))
-		b, err := c.getOnce(ctx, "/api/v1/candles", q, false)
+		// Live tip skips the backfill pacer so BTC and ETH can fly together.
+		// A 300ms gap here was the whole ETH detect lag behind BTC.
+		b, err := c.getOnce(ctx, "/api/v1/candles", q, false, !liveTip)
 		if err != nil {
 			return nil, err
 		}
@@ -390,9 +392,11 @@ type httpResult struct {
 	retryAfter string
 }
 
-func (c *HTTPClient) getOnce(ctx context.Context, path string, q url.Values, auth bool) (httpResult, error) {
-	if err := c.pace(ctx); err != nil {
-		return httpResult{}, err
+func (c *HTTPClient) getOnce(ctx context.Context, path string, q url.Values, auth, paced bool) (httpResult, error) {
+	if paced {
+		if err := c.pace(ctx); err != nil {
+			return httpResult{}, err
+		}
 	}
 	u := c.BaseURL + path
 	if len(q) > 0 {
