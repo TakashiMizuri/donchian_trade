@@ -809,12 +809,13 @@ func (e *Engine) Reconcile(ctx context.Context) {
 	}
 
 	type slClose struct {
-		sym  string
-		st   strategy.State
-		id   int64
-		stop float64
-		bars []strategy.Bar
-		dir  strategy.Direction
+		sym        string
+		st         strategy.State
+		id         int64
+		stop       float64
+		bars       []strategy.Bar
+		dir        strategy.Direction
+		signalTime int64
 	}
 	var pending []slClose
 
@@ -830,9 +831,13 @@ func (e *Engine) Reconcile(ctx context.Context) {
 			open, _ := e.Store.OpenLiveTrade(ctx, sym)
 			if open != nil {
 				bars := append([]strategy.Bar(nil), e.bars[sym]...)
+				sig := st.Position.SignalTime
+				if open.SignalTime != 0 {
+					sig = open.SignalTime
+				}
 				pending = append(pending, slClose{
 					sym: sym, st: st, id: open.ID, stop: open.Stop.Float64, bars: bars,
-					dir: st.Position.Direction,
+					dir: st.Position.Direction, signalTime: sig,
 				})
 			}
 			st.Position = nil
@@ -882,8 +887,9 @@ func (e *Engine) Reconcile(ctx context.Context) {
 			e.clearOrderIdx(p.sym)
 		}
 		// Exchange SL can fire on a wick that never appears in the closed candle
-		// OHLC — force twin/baseline flat so live does not re-enter alone (live_only).
-		e.syncShadowsAfterLiveSL(ctx, p.sym, p.dir, exitTime)
+		// OHLC — force twin/baseline flat for the *same* signal so live does not
+		// re-enter alone (live_only). Older twin holds (e.g. after live tstop) stay.
+		e.syncShadowsAfterLiveSL(ctx, p.sym, p.dir, p.signalTime, exitTime)
 		e.alert(ctx, "info", "reconcile", p.sym+" exchange flat — closed local as SL/fill")
 		if e.Flog != nil {
 			e.Flog.Event("reconcile", map[string]any{"symbol": p.sym, "issue": "exchange_flat_closed_local"})
