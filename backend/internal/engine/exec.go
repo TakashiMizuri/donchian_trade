@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"time"
 
 	"donchian.trade/bot/internal/exchange/lighter"
 	"donchian.trade/bot/internal/strategy"
@@ -23,6 +24,10 @@ func fundingPnL(basisPaidOut, lastPaidOut float64) float64 {
 }
 
 func (e *Engine) waitFill(ctx context.Context, symbol string, clientIdx int64, txHash string, fallback float64) (px, fee float64) {
+	return e.waitFillFor(ctx, symbol, clientIdx, txHash, fallback, 5*time.Second)
+}
+
+func (e *Engine) waitFillFor(ctx context.Context, symbol string, clientIdx int64, txHash string, fallback float64, budget time.Duration) (px, fee float64) {
 	if e.Cfg.DryRun || e.HTTP == nil {
 		return fallback, 0
 	}
@@ -30,32 +35,26 @@ func (e *Engine) waitFill(ctx context.Context, symbol string, clientIdx int64, t
 	if !ok {
 		return fallback, 0
 	}
-	px, fee = e.HTTP.WaitFill(ctx, e.Cfg.AccountIndex, meta.MarketID, clientIdx, txHash, 0)
-	if px > 0 {
-		return px, fee
-	}
-	if avg := e.positionAvg(ctx, symbol); avg > 0 {
-		e.Log.Warn("fill missing, using position avg", "symbol", symbol, "client", clientIdx, "avg", avg)
-		return avg, 0
-	}
-	return fallback, 0
+	return e.HTTP.WaitFillFor(ctx, e.Cfg.AccountIndex, meta.MarketID, clientIdx, txHash, fallback, budget)
 }
 
-func (e *Engine) positionAvg(ctx context.Context, symbol string) float64 {
+// exchangePos returns the open exchange position for symbol, if any.
+func (e *Engine) exchangePos(ctx context.Context, symbol string) *lighter.Position {
 	if e.HTTP == nil {
-		return 0
+		return nil
 	}
 	acc, err := e.HTTP.Account(ctx, e.Cfg.AccountIndex)
 	if err != nil || acc == nil {
-		return 0
+		return nil
 	}
 	meta := e.Markets[symbol]
-	for _, p := range acc.Positions {
-		if p.MarketID == meta.MarketID && p.Size > 0 && p.AvgEntry > 0 {
-			return p.AvgEntry
+	for i := range acc.Positions {
+		p := &acc.Positions[i]
+		if p.MarketID == meta.MarketID && p.Size > 0 {
+			return p
 		}
 	}
-	return 0
+	return nil
 }
 
 func (e *Engine) markFunding(acc *lighter.Account) {
@@ -139,6 +138,51 @@ func (e *Engine) recordEntryFill(ctx context.Context, symbol string, tradeID, cl
 	return livePx
 }
 
+// resolveLiveExitFill finds a real exit price. It must never treat an open
+// position's avg entry as the exit — that recorded ~0 PnL on 1m while the
+// exchange was still in the trade, then reconcile flattened without booking it.
+// Last/shadow fallbacks are allowed only after the exchange position is flat.
+func (e *Engine) resolveLiveExitFill(ctx context.Context, symbol string, clientIdx int64, txHash string, shadowExit float64) (px, fee float64) {
+	px, fee = e.waitFillFor(ctx, symbol, clientIdx, txHash, 0, 12*time.Second)
+	if px > 0 {
+		return px, fee
+	}
+	if ex := e.exchangePos(ctx, symbol); ex != nil && ex.Size > 0 {
+		e.Log.Warn("exit fill missing while exchange still open — forcing flatten",
+			"symbol", symbol, "client", clientIdx, "size", ex.Size)
+		flatIdx, flatTx := e.flatten(ctx, symbol, *ex)
+		if flatIdx != 0 {
+			if p, f := e.waitFillFor(ctx, symbol, flatIdx, flatTx, 0, 12*time.Second); p > 0 {
+				return p, f
+			}
+		}
+		// Flatten sent but fill not indexed yet — one more account poll by either client.
+		if p, f := e.waitFillFor(ctx, symbol, clientIdx, txHash, 0, 3*time.Second); p > 0 {
+			return p, f
+		}
+		if flatIdx != 0 {
+			if p, f := e.waitFillFor(ctx, symbol, flatIdx, flatTx, 0, 3*time.Second); p > 0 {
+				return p, f
+			}
+		}
+		// Still open on exchange — refuse to invent an exit price.
+		if still := e.exchangePos(ctx, symbol); still != nil && still.Size > 0 {
+			e.Log.Error("exit unresolved and exchange still open — refusing avg/last fallback",
+				"symbol", symbol, "client", clientIdx, "size", still.Size)
+			return 0, 0
+		}
+	}
+	if last := e.LastPrice(symbol); last > 0 {
+		e.Log.Warn("exit fill not found, using last price", "symbol", symbol, "client", clientIdx, "px", last)
+		return last, 0
+	}
+	if shadowExit > 0 {
+		e.Log.Warn("exit fill not found, using shadow exit", "symbol", symbol, "client", clientIdx, "px", shadowExit)
+		return shadowExit, 0
+	}
+	return 0, 0
+}
+
 func (e *Engine) finishCloseLive(ctx context.Context, symbol string, tradeID int64, st *strategy.State, t *strategy.Trade, clientIdx int64, txHash string) {
 	if t == nil {
 		return
@@ -152,16 +196,10 @@ func (e *Engine) finishCloseLive(ctx context.Context, symbol string, tradeID int
 		}
 	}
 	shadowExit := t.ExitPrice
-	liveExit, exitFee := e.waitFill(ctx, symbol, clientIdx, txHash, 0)
+	liveExit, exitFee := e.resolveLiveExitFill(ctx, symbol, clientIdx, txHash, shadowExit)
 	if liveExit <= 0 {
-		exitFee = 0
-		if px := e.LastPrice(symbol); px > 0 {
-			e.Log.Warn("exit fill not found, using last price", "symbol", symbol, "client", clientIdx, "px", px)
-			liveExit = px
-		} else {
-			e.Log.Warn("exit fill not found, using shadow exit", "symbol", symbol, "client", clientIdx, "px", shadowExit)
-			liveExit = shadowExit
-		}
+		e.Log.Error("exit fill unresolved — leaving trade open", "symbol", symbol, "client", clientIdx, "signal", t.SignalTime)
+		return
 	}
 	row, _ := e.Store.TradeBySignal(ctx, symbol, telemetry.BookLive, t.SignalTime)
 	liveEntry := t.EntryPrice

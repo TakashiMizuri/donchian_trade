@@ -153,7 +153,15 @@ func VWAP(fills []Fill) (px, qty, fee float64) {
 }
 
 func (c *HTTPClient) WaitFill(ctx context.Context, accountIndex int64, marketID uint16, clientIdx int64, txHash string, fallback float64) (px, fee float64) {
-	deadline := time.Now().Add(5 * time.Second)
+	return c.WaitFillFor(ctx, accountIndex, marketID, clientIdx, txHash, fallback, 5*time.Second)
+}
+
+// WaitFillFor is WaitFill with an explicit poll budget (exits need longer than entries).
+func (c *HTTPClient) WaitFillFor(ctx context.Context, accountIndex int64, marketID uint16, clientIdx int64, txHash string, fallback float64, budget time.Duration) (px, fee float64) {
+	if budget <= 0 {
+		budget = 5 * time.Second
+	}
+	deadline := time.Now().Add(budget)
 	for {
 		fills, err := c.AccountTrades(ctx, accountIndex, marketID, 100)
 		if err == nil {

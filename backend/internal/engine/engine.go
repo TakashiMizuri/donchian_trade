@@ -737,6 +737,16 @@ func (e *Engine) executeExit(ctx context.Context, symbol string, st *strategy.St
 	e.cancelStops(ctx, symbol)
 	t := strategy.Apply(st, e.liveCfg, bars, act)
 	e.finishCloseLive(ctx, symbol, int64(pos.ID), st, t, clientIdx, tx)
+	if row, _ := e.Store.TradeBySignal(ctx, symbol, telemetry.BookLive, pos.SignalTime); row != nil {
+		if !row.Outcome.Valid || row.Outcome.String == "" || row.Outcome.String == "open" {
+			st.Position = &pos
+			e.Log.Warn("exit sent but live fill not booked — restored local position",
+				"symbol", symbol, "signal", pos.SignalTime, "client", clientIdx)
+			e.alert(ctx, "warn", "exit", symbol+" exit fill pending — local position restored")
+			// Protective SL was canceled above; reconcile ensureStop will re-arm or flatten.
+			return fmt.Errorf("%s exit fill unresolved", symbol)
+		}
+	}
 	e.clearOrderIdx(symbol)
 	e.alert(ctx, "info", "exit", fmt.Sprintf("%s %s %s px=%.2f outcome=%s", symbol, act.Kind, pos.Direction, act.Price, act.Kind))
 	return nil
@@ -750,10 +760,23 @@ func (e *Engine) noteStopHit(ctx context.Context, symbol string, st *strategy.St
 	t := strategy.Apply(st, e.liveCfg, bars, act)
 	if e.Cfg.DryRun {
 		e.finishClose(ctx, symbol, int64(pos.ID), st, t, act)
-	} else {
-		e.finishCloseLive(ctx, symbol, int64(pos.ID), st, t, e.slClientIdx(symbol), "")
-		e.clearOrderIdx(symbol)
+		e.alert(ctx, "info", "sl", fmt.Sprintf("%s ATR stop hit at %.2f", symbol, act.Price))
+		return
 	}
+	slIdx := e.slClientIdx(symbol)
+	e.finishCloseLive(ctx, symbol, int64(pos.ID), st, t, slIdx, "")
+	// Candle OHLC can cross the stop before the exchange fill is visible. If we
+	// could not book a real exit, restore local state and keep the protective SL.
+	if row, _ := e.Store.TradeBySignal(ctx, symbol, telemetry.BookLive, pos.SignalTime); row != nil {
+		if !row.Outcome.Valid || row.Outcome.String == "" || row.Outcome.String == "open" {
+			st.Position = &pos
+			e.Log.Warn("ATR stop on candle but live exit not booked — restored local position",
+				"symbol", symbol, "signal", pos.SignalTime, "sl_client", slIdx)
+			e.alert(ctx, "warn", "sl", symbol+" ATR stop on candle, exchange exit pending")
+			return
+		}
+	}
+	e.clearOrderIdx(symbol)
 	e.alert(ctx, "info", "sl", fmt.Sprintf("%s ATR stop hit at %.2f", symbol, act.Price))
 }
 
@@ -811,6 +834,7 @@ func (e *Engine) Reconcile(ctx context.Context) {
 	type slClose struct {
 		sym        string
 		st         strategy.State
+		pos        strategy.Position // snapshot before Apply clears it
 		id         int64
 		stop       float64
 		bars       []strategy.Bar
@@ -836,7 +860,7 @@ func (e *Engine) Reconcile(ctx context.Context) {
 					sig = open.SignalTime
 				}
 				pending = append(pending, slClose{
-					sym: sym, st: st, id: open.ID, stop: open.Stop.Float64, bars: bars,
+					sym: sym, st: st, pos: *st.Position, id: open.ID, stop: open.Stop.Float64, bars: bars,
 					dir: st.Position.Direction, signalTime: sig,
 				})
 			}
@@ -884,6 +908,24 @@ func (e *Engine) Reconcile(ctx context.Context) {
 			e.finishClose(ctx, p.sym, p.id, &p.st, t, act)
 		} else {
 			e.finishCloseLive(ctx, p.sym, p.id, &p.st, t, e.slClientIdx(p.sym), "")
+			if row, _ := e.Store.TradeBySignal(ctx, p.sym, telemetry.BookLive, p.signalTime); row != nil {
+				if !row.Outcome.Valid || row.Outcome.String == "" || row.Outcome.String == "open" {
+					// Exchange looks flat but we could not book an exit — restore local
+					// and retry next reconcile (do not sync shadows / clear indexes yet).
+					e.mu.Lock()
+					st := e.liveST[p.sym]
+					pos := p.pos
+					st.Position = &pos
+					e.liveST[p.sym] = st
+					e.persistSymbol(ctx, p.sym, st, e.bars[p.sym])
+					e.mu.Unlock()
+					e.alert(ctx, "warn", "reconcile", p.sym+" exchange flat but exit not booked — retry")
+					if e.Flog != nil {
+						e.Flog.Event("reconcile", map[string]any{"symbol": p.sym, "issue": "exit_unbooked"})
+					}
+					continue
+				}
+			}
 			e.clearOrderIdx(p.sym)
 		}
 		// Exchange SL can fire on a wick that never appears in the closed candle
@@ -938,9 +980,15 @@ func (e *Engine) ensureStop(ctx context.Context, symbol string, st strategy.Stat
 	e.mu.Lock()
 }
 
-func (e *Engine) flatten(ctx context.Context, symbol string, ex lighter.Position) {
+// flatten sends a reduce-only market IOC for the exchange position.
+// Returns the client order index and tx hash so callers can wait for the fill.
+func (e *Engine) flatten(ctx context.Context, symbol string, ex lighter.Position) (clientIdx int64, txHash string) {
 	if e.Cfg.DryRun || ex.Size <= 0 {
-		return
+		return 0, ""
+	}
+	if e.Signer == nil {
+		e.alert(ctx, "error", "flatten", symbol+" signer is not configured")
+		return 0, ""
 	}
 	buy := ex.Sign < 0 // short → buy to flatten
 	px := ex.AvgEntry
@@ -952,17 +1000,21 @@ func (e *Engine) flatten(ctx context.Context, symbol string, ex lighter.Position
 	idx, err := e.Store.NextClientOrderIndex(ctx)
 	if err != nil {
 		e.alert(ctx, "error", "flatten", err.Error())
-		return
+		return 0, ""
 	}
 	e.txMu.Lock()
-	_, err = e.Signer.MarketIOC(symbol, buy, ex.Size, px, e.Cfg.MarketSlippage, idx, true)
+	res, err := e.Signer.MarketIOC(symbol, buy, ex.Size, px, e.Cfg.MarketSlippage, idx, true)
 	e.txMu.Unlock()
 	if err != nil {
 		e.alert(ctx, "error", "flatten", symbol+" "+err.Error())
-		return
+		return 0, ""
+	}
+	if res != nil {
+		txHash = res.TxHash
 	}
 	e.cancelStops(ctx, symbol)
 	e.alert(ctx, "warn", "flatten", fmt.Sprintf("%s flattened size=%.6f", symbol, ex.Size))
+	return idx, txHash
 }
 
 func (e *Engine) KillAll(ctx context.Context) error {
