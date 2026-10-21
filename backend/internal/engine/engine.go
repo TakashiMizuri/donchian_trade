@@ -92,7 +92,7 @@ func New(cfg *config.Config, st *store.Store, httpc *lighter.HTTPClient, signer 
 		bars: map[string][]strategy.Bar{}, liveST: map[string]strategy.State{},
 		shadowLS5: map[string]strategy.State{}, shadowBase: map[string]strategy.State{},
 		lastPrice: map[string]float64{}, lastBar: map[string]int64{}, busy: map[string]bool{},
-		pending: map[string][]pendingClosed{},
+		pending:  map[string][]pendingClosed{},
 		entryIdx: map[string]int64{}, slIdx: map[string]int64{},
 		fundingBasis: map[string]float64{}, fundingLast: map[string]float64{},
 		alertAt: map[string]time.Time{},
@@ -557,6 +557,32 @@ func uniqueBars(bars []strategy.Bar) []strategy.Bar {
 	return out
 }
 
+// ownEntryInFlight is the 5m 2026-10-21 race: MarketIOC fills, Reconcile sees
+// exchange size while liveST is still nil and flattens our own trade.
+func ownEntryInFlight(busy, hasOpenLive bool) bool {
+	return busy || hasOpenLive
+}
+
+func positionFromOpen(open *store.TradeRow, bars []strategy.Bar) *strategy.Position {
+	if open == nil {
+		return nil
+	}
+	px := open.EntryPrice.Float64
+	if open.EntryPxLive > 0 {
+		px = open.EntryPxLive
+	}
+	return &strategy.Position{
+		ID:           int(open.ID),
+		Direction:    strategy.Direction(open.Direction),
+		EntryPrice:   px,
+		Stop:         open.Stop.Float64,
+		RiskDistance: open.RiskDistance.Float64,
+		SignalTime:   open.SignalTime,
+		Quantity:     open.Quantity.Float64,
+		EntryIdx:     indexOf(bars, open.EntryTime.Int64),
+	}
+}
+
 func (e *Engine) persistSymbol(ctx context.Context, symbol string, st strategy.State, bars []strategy.Bar) {
 	sst := store.SymbolState{
 		BarsSeen: len(bars),
@@ -680,6 +706,13 @@ func (e *Engine) executeEntry(ctx context.Context, symbol string, st *strategy.S
 		st.Position.ID = int(id)
 		st.Position.Quantity = qty
 	}
+	// Publish before shadow-book work in processClosed. Reconcile otherwise sees
+	// exchange size with a still-nil liveST and flattens our own fill.
+	e.mu.Lock()
+	cur := e.liveST[symbol]
+	cur.Position = st.Position
+	e.liveST[symbol] = cur
+	e.mu.Unlock()
 
 	e.Log.Info("entry lag",
 		"symbol", symbol,
@@ -849,6 +882,10 @@ func (e *Engine) Reconcile(ctx context.Context) {
 		st.Equity = eq
 		meta := e.Markets[sym]
 		ex, hasEx := byMarket[meta.MarketID]
+		openRow, _ := e.Store.OpenLiveTrade(ctx, sym)
+		if st.Position == nil && openRow != nil && !e.busy[sym] {
+			st.Position = positionFromOpen(openRow, e.bars[sym])
+		}
 		local := st.Position != nil
 		switch {
 		case local && !hasEx:
@@ -866,6 +903,13 @@ func (e *Engine) Reconcile(ctx context.Context) {
 			}
 			st.Position = nil
 		case !local && hasEx:
+			if ownEntryInFlight(e.busy[sym], openRow != nil) {
+				// Entry is in flight (order on exchange, liveST not published yet).
+				if e.Flog != nil {
+					e.Flog.Event("reconcile", map[string]any{"symbol": sym, "issue": "entry_in_flight", "size": ex.Size})
+				}
+				continue
+			}
 			msg := fmt.Sprintf("%s unexpected exchange position size=%.6f — flattening", sym, ex.Size)
 			if e.Flog != nil {
 				e.Flog.Event("reconcile", map[string]any{"symbol": sym, "issue": "unexpected_position", "size": ex.Size})
