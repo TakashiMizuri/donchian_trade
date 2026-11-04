@@ -60,6 +60,7 @@ type Engine struct {
 	idxMu        sync.Mutex
 	entryIdx     map[string]int64
 	slIdx        map[string]int64
+	slTrigger    map[string]float64
 	fundingBasis map[string]float64
 	fundingLast  map[string]float64
 
@@ -93,7 +94,7 @@ func New(cfg *config.Config, st *store.Store, httpc *lighter.HTTPClient, signer 
 		shadowLS5: map[string]strategy.State{}, shadowBase: map[string]strategy.State{},
 		lastPrice: map[string]float64{}, lastBar: map[string]int64{}, busy: map[string]bool{},
 		pending:  map[string][]pendingClosed{},
-		entryIdx: map[string]int64{}, slIdx: map[string]int64{},
+		entryIdx: map[string]int64{}, slIdx: map[string]int64{}, slTrigger: map[string]float64{},
 		fundingBasis: map[string]float64{}, fundingLast: map[string]float64{},
 		alertAt: map[string]time.Time{},
 		started: time.Now(), liveCfg: live, twinCfg: twin, baseCfg: base,
@@ -230,7 +231,14 @@ func (e *Engine) Bootstrap(ctx context.Context) error {
 	}
 	// Prefer strategy warmup (+7d buffer) over a flat 120d window — 1m×120d
 	// is ~170k candles and trips venue rate limits on cold start.
-	needBars := strategy.Warmup(e.liveCfg) + int((7*24*time.Hour)/tf)
+	need := strategy.Warmup(e.liveCfg)
+	if w := strategy.Warmup(e.twinCfg); w > need {
+		need = w
+	}
+	if w := strategy.Warmup(e.baseCfg); w > need {
+		need = w
+	}
+	needBars := need + int((7*24*time.Hour)/tf)
 	if needBars < 500 {
 		needBars = 500
 	}
@@ -322,6 +330,9 @@ func (e *Engine) Bootstrap(ctx context.Context) error {
 			"tf_sec":       int(tf.Seconds()),
 			"brk_atr":      e.Cfg.MinBreakoutATR,
 			"vol_rank_max": e.Cfg.MaxVolRank,
+			"tstop":        e.Cfg.MaxBarsInTrade,
+			"late_trail":   e.Cfg.LateTrailOnBars,
+			"late_trail_r": e.Cfg.LateTrailR,
 			"symbols":      e.Cfg.Symbols,
 			"market_ids":   mids,
 			"seed_equity":  e.cashBase(),
@@ -474,6 +485,13 @@ func (e *Engine) processClosed(ctx context.Context, symbol string, bar strategy.
 	switch act.Kind {
 	case strategy.ActionExitStop:
 		e.noteStopHit(ctx, symbol, &st, bars, act)
+	case strategy.ActionExitTrail:
+		e.noteStopHit(ctx, symbol, &st, bars, act)
+		if st.Position != nil {
+			if err := e.executeExit(ctx, symbol, &st, bars, act, true); err != nil {
+				e.alert(ctx, "error", "exit", symbol+" trail exit failed: "+err.Error())
+			}
+		}
 	case strategy.ActionExitChannel, strategy.ActionExitTimeStop:
 		label := "channel"
 		if act.Kind == strategy.ActionExitTimeStop {
@@ -493,8 +511,12 @@ func (e *Engine) processClosed(ctx context.Context, symbol string, bar strategy.
 	if err := e.Store.UpsertCandles(ctx, symbol, []strategy.Bar{bar}); err != nil {
 		e.alert(ctx, "error", "db", "candle persist: "+err.Error())
 	}
+	if st.Position != nil {
+		e.maybeArmTrailStop(ctx, symbol, bars, i, st)
+	}
+
 	if e.Cfg.ShadowBrkVol {
-		// Twin of live filters (brk/vol); tstop usually off. Book key shadow_ls5.
+		// Paper twin of live (same knobs). Book key shadow_ls5.
 		e.stepBook(ctx, symbol, telemetry.BookLS5, bars, atr, i, nextOpen, nextTime, &ls5, e.twinCfg)
 	}
 	if e.Cfg.ShadowBaseline {
@@ -701,6 +723,7 @@ func (e *Engine) executeEntry(ctx context.Context, symbol string, st *strategy.S
 	}
 	_ = e.Store.InsertOrder(ctx, symbol, slIdx, "stop", "open", true, 0, act.Stop, qty, "")
 	e.setOrderIdx(symbol, clientIdx, slIdx)
+	e.setSLTrigger(symbol, act.Stop)
 	strategy.Apply(st, e.liveCfg, bars, act)
 	if st.Position != nil {
 		st.Position.ID = int(id)
@@ -810,7 +833,11 @@ func (e *Engine) noteStopHit(ctx context.Context, symbol string, st *strategy.St
 		}
 	}
 	e.clearOrderIdx(symbol)
-	e.alert(ctx, "info", "sl", fmt.Sprintf("%s ATR stop hit at %.2f", symbol, act.Price))
+	label := "ATR stop"
+	if act.Kind == strategy.ActionExitTrail {
+		label = "late trail"
+	}
+	e.alert(ctx, "info", "sl", fmt.Sprintf("%s %s hit at %.2f", symbol, label, act.Price))
 }
 
 func (e *Engine) finishClose(ctx context.Context, symbol string, id int64, st *strategy.State, t *strategy.Trade, act strategy.Action) {
@@ -946,7 +973,12 @@ func (e *Engine) Reconcile(ctx context.Context) {
 
 	for _, p := range pending {
 		exitTime := time.Now().Unix()
-		act := strategy.Action{Kind: strategy.ActionExitStop, Price: p.stop, FillTime: exitTime, FillIdx: len(p.bars) - 1}
+		fillIdx := len(p.bars) - 1
+		act := strategy.Action{Kind: strategy.ActionExitStop, Price: p.stop, Stop: p.stop, FillTime: exitTime, FillIdx: fillIdx, Direction: p.dir, SignalTime: p.signalTime}
+		if trail, ok := strategy.TrailStopForBar(p.bars, len(p.bars), &p.pos, e.liveCfg); ok {
+			act.Kind = strategy.ActionExitTrail
+			act.Price = trail
+		}
 		t := strategy.Apply(&p.st, e.liveCfg, p.bars, act)
 		if e.Cfg.DryRun {
 			e.finishClose(ctx, p.sym, p.id, &p.st, t, act)
@@ -975,7 +1007,9 @@ func (e *Engine) Reconcile(ctx context.Context) {
 		// Exchange SL can fire on a wick that never appears in the closed candle
 		// OHLC — force twin/baseline flat for the *same* signal so live does not
 		// re-enter alone (live_only). Older twin holds (e.g. after live tstop) stay.
-		e.syncShadowsAfterLiveSL(ctx, p.sym, p.dir, p.signalTime, exitTime)
+		if act.Kind == strategy.ActionExitStop {
+			e.syncShadowsAfterLiveSL(ctx, p.sym, p.dir, p.signalTime, exitTime)
+		}
 		e.alert(ctx, "info", "reconcile", p.sym+" exchange flat — closed local as SL/fill")
 		if e.Flog != nil {
 			e.Flog.Event("reconcile", map[string]any{"symbol": p.sym, "issue": "exchange_flat_closed_local"})
@@ -1004,14 +1038,27 @@ func (e *Engine) ensureStop(ctx context.Context, symbol string, st strategy.Stat
 		e.alert(ctx, "warn", "watchdog", symbol+" cannot list orders: "+err.Error())
 		return
 	}
+	want := st.Position.Stop
+	if trail, ok := strategy.TrailStopForBar(e.bars[symbol], len(e.bars[symbol]), st.Position, e.liveCfg); ok {
+		want = trail
+	}
 	hasSL := false
+	trigger := 0.0
 	for _, o := range orders {
 		if o.ReduceOnly && o.Trigger > 0 {
 			hasSL = true
+			trigger = o.Trigger
 			break
 		}
 	}
+	if hasSL && stopClose(trigger, want) {
+		e.setSLTrigger(symbol, trigger)
+		return
+	}
 	if hasSL {
+		e.mu.Unlock()
+		e.replaceProtectiveStop(ctx, symbol, st, want)
+		e.mu.Lock()
 		return
 	}
 	e.alert(ctx, "error", "watchdog", symbol+" protective stop missing — flattening")

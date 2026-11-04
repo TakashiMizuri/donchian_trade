@@ -34,6 +34,9 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("strategy profile", cfg.ProfileLog()...)
+	for _, w := range cfg.StrategyWarnings {
+		log.Warn("strategy profile", "warning", w)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()

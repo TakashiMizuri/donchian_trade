@@ -67,10 +67,22 @@ type Config struct {
 	MaxVolRank      float64
 	VolRankBars     int
 	VolRankLookback int
-	ShadowBrkVol    bool // twin shadow with live entry filters (stored as shadow_ls5)
+	ShadowBrkVol    bool // twin shadow (stored as shadow_ls5)
 
 	MaxBarsInTrade       int // live time-stop in bars (0 = off)
-	ShadowMaxBarsInTrade int // twin shadow time-stop (0 = off; startpack: match without tstop)
+	ShadowMaxBarsInTrade int // twin shadow time-stop (0 = off)
+
+	LateTrailOnBars int
+	LateTrailR      float64
+	LateTrailMinMFE float64
+
+	ShadowMinBreakoutATR  float64
+	ShadowMaxVolRank      float64
+	ShadowLateTrailOnBars int
+	ShadowLateTrailR      float64
+	ShadowLateTrailMinMFE float64
+
+	StrategyWarnings []string
 }
 
 func Load() (*Config, error) {
@@ -161,6 +173,10 @@ func getenvFloat(k string, def float64) float64 {
 		}
 	}
 	return def
+}
+
+func envSet(k string) bool {
+	return strings.TrimSpace(os.Getenv(k)) != ""
 }
 
 func getenvBool(k string, def bool) bool {

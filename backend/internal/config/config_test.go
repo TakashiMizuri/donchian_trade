@@ -167,6 +167,71 @@ func TestRejectUnknownTimeframe(t *testing.T) {
 	}
 }
 
+func TestFiveMCoreLateTrail2RPreset(t *testing.T) {
+	t.Setenv("DONCHIAN_TIMEFRAME", "5m")
+	t.Setenv("DONCHIAN_BAR_SECONDS", "300")
+	t.Setenv("DONCHIAN_CHANNEL_N", "360")
+	t.Setenv("DONCHIAN_EXIT_M", "180")
+	t.Setenv("DONCHIAN_ATR_PERIOD", "240")
+	t.Setenv("DONCHIAN_LIVE_PROFILE", "core")
+	t.Setenv("DONCHIAN_MIN_BREAKOUT_ATR", "0")
+	t.Setenv("DONCHIAN_MAX_VOL_RANK", "0")
+	t.Setenv("DONCHIAN_MAX_BARS_IN_TRADE", "240")
+	t.Setenv("DONCHIAN_LATE_TRAIL_ON_BARS", "216")
+	t.Setenv("DONCHIAN_LATE_TRAIL_R", "2")
+	t.Setenv("DONCHIAN_LATE_TRAIL_MIN_MFE", "6")
+	cfg := loadWithPass(t)
+	if cfg.LiveProfile != "core" || cfg.MinBreakoutATR != 0 || cfg.MaxVolRank != 0 {
+		t.Fatalf("live filters %+v", cfg)
+	}
+	live := cfg.LiveConfig()
+	twin := cfg.ShadowTwinConfig()
+	if live.LateTrailOnBars != 216 || live.LateTrailR != 2 || live.LateTrailMinMFE != 6 {
+		t.Fatalf("live trail %+v", live)
+	}
+	if twin.MinBreakoutATR != 0 || twin.MaxVolRank != 0 {
+		t.Fatalf("twin must copy live filters %+v", twin)
+	}
+	if twin.LateTrailOnBars != 216 || twin.LateTrailR != 2 || twin.LateTrailMinMFE != 6 {
+		t.Fatalf("twin trail %+v", twin)
+	}
+	if live.MaxBarsInTrade != 240 || twin.MaxBarsInTrade != 240 {
+		t.Fatalf("tstop live=%d twin=%d", live.MaxBarsInTrade, twin.MaxBarsInTrade)
+	}
+	if len(cfg.StrategyWarnings) != 0 {
+		t.Fatalf("unexpected warnings %v", cfg.StrategyWarnings)
+	}
+}
+
+func TestOneMCoreLateTrail6RPreset(t *testing.T) {
+	t.Setenv("DONCHIAN_TAG", "1m_N1800_M900_ATR1200_R1.0_brk0_voloff_tstop14h_late12h_6R_satellite")
+	t.Setenv("DONCHIAN_TIMEFRAME", "1m")
+	t.Setenv("DONCHIAN_BAR_SECONDS", "60")
+	t.Setenv("DONCHIAN_CHANNEL_N", "1800")
+	t.Setenv("DONCHIAN_EXIT_M", "900")
+	t.Setenv("DONCHIAN_ATR_PERIOD", "1200")
+	t.Setenv("DONCHIAN_LIVE_PROFILE", "core")
+	t.Setenv("DONCHIAN_MIN_BREAKOUT_ATR", "0")
+	t.Setenv("DONCHIAN_MAX_VOL_RANK", "0")
+	t.Setenv("DONCHIAN_MAX_BARS_IN_TRADE", "840")
+	t.Setenv("DONCHIAN_LATE_TRAIL_ON_BARS", "720")
+	t.Setenv("DONCHIAN_LATE_TRAIL_R", "6")
+	t.Setenv("DONCHIAN_LATE_TRAIL_MIN_MFE", "15")
+	t.Setenv("DONCHIAN_MAX_RISK_USD", "1000")
+	cfg := loadWithPass(t)
+	live := cfg.LiveConfig()
+	twin := cfg.ShadowTwinConfig()
+	if live.LateTrailR != 6 || twin.LateTrailR != 6 {
+		t.Fatalf("trail live=%v twin=%v", live.LateTrailR, twin.LateTrailR)
+	}
+	if twin.MinBreakoutATR != 0 {
+		t.Fatalf("twin brk %v", twin.MinBreakoutATR)
+	}
+	if len(cfg.StrategyWarnings) != 0 {
+		t.Fatalf("warnings %v", cfg.StrategyWarnings)
+	}
+}
+
 func TestRejectLS5Profile(t *testing.T) {
 	t.Setenv("DASHBOARD_PASSWORD", "x")
 	t.Setenv("DONCHIAN_LIVE_PROFILE", "ls5_cond_brk2.0")

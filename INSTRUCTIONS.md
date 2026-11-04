@@ -1,8 +1,16 @@
 # Операции на проде
 
 Каталог на VPS: `/opt/donchian`.  
-`bot_a` = 5m, `bot_b` = 1m.  
-Файлы `.env.a` и `.env.b` **не удалять**.
+`bot_a` = **5m R-026** (brk0 + vol off + tstop 20h + late trail 18h/2R).  
+`bot_b` = **1m R-025 satellite** (brk0 + vol off + tstop 14h + late trail 12h/6R).  
+Файлы `.env.a` и `.env.b` **не удалять** (там ключи Lighter / Telegram / пароль дашборда).
+
+Контракты:
+
+- 5m: [`docs/DONCHIAN_LIVE_STARTPACK_5M_BRK0_VOLOFF_TSTOP20_LATE_TRAIL2.md`](docs/DONCHIAN_LIVE_STARTPACK_5M_BRK0_VOLOFF_TSTOP20_LATE_TRAIL2.md)
+- 1m: [`docs/DONCHIAN_LIVE_STARTPACK_1M_BRK0_VOLOFF_TSTOP14_LATE_TRAIL6.md`](docs/DONCHIAN_LIVE_STARTPACK_1M_BRK0_VOLOFF_TSTOP14_LATE_TRAIL6.md)
+
+Это **новый run_id**. Старый `bot.db` с brk+vol без trail (или с другим trail R) процесс не примет — fingerprint другой. Нужен полный сброс журнала (§1.0 / §1.1).
 
 Перед полным сбросом на **обоих** аккаунтах Lighter не должно быть открытых позиций и висящих стопов. После пустой базы бот считает себя flat и чужую позицию на бирже закроет рынком.
 
@@ -11,8 +19,131 @@
 
 ---
 
+## 0. Переход на BRK0 + late trail (с текущего 5m/1m brk+vol)
+
+С Windows код уже в репо. На VPS — `git pull`, правка `.env.a`/`.env.b`, wipe sqlite, recreate.
+
+### 0.1 Что меняется в стратегии
+
+| | Было (live) | Стало (live **и** тень `shadow_ls5`) |
+|--|--|--|
+| `bot_a` 5m | brk 0.5 + vol 0.64, tstop 20h, без trail | **фильтры off**, tstop 20h, **trail 216 / 2R / MFE 6** |
+| `bot_b` 1m | brk 0.5 + vol 0.64, tstop 14h, без trail | **фильтры off**, tstop 14h, **trail 720 / 6R / MFE 15** |
+
+Тень — **та же стратегия**, бумажные филлы (без слипа). Расхождение Live↔Тень = исполнение, не другой набор knobs. Baseline по-прежнему голый канал без фильтров/tstop/trail.
+
+`MAX_VOL_RANK=0` = фильтр **выключен**, не «пропускать rank 0».  
+Trail: peak **прошлого** бара; orig ATR-стоп важнее на том же баре; trail-выход = `outcome=time`, цена = `trail_stop` (не next open).  
+Когда trail вооружён, бот **переставляет** биржевой reduce-only SL на lagged trail.
+
+Не копировать 2R на 1m и 6R на 5m. Не возвращать brk/vol «потому что DD». Не ретюнить 216/2/6 и 720/6/15 по живой неделе.
+
+### 0.2 Правка `.env.a` / `.env.b` на VPS
+
+**Не** `cp .env.example .env.a` — сотрёте ключи. Меняйте только `DONCHIAN_*` / `SHADOW_*`. `LIGHTER_*`, `TELEGRAM_*`, `DASHBOARD_PASSWORD`, `SYMBOLS` оставить.
+
+На VPS:
+
+```bash
+cd /opt/donchian
+cp -a .env.a .env.a.bak-$(date -u +%Y%m%dT%H%M%SZ)
+cp -a .env.b .env.b.bak-$(date -u +%Y%m%dT%H%M%SZ)
+```
+
+`.env.a` (5m) — добейтесь такого блока (остальное не трогать):
+
+```dotenv
+SHADOW_BASELINE=true
+DONCHIAN_SHADOW_BRK_VOL=true
+
+DONCHIAN_TAG=5m_N360_M180_ATR240_R1.0_brk0_voloff_tstop20h_late18h_2R
+DONCHIAN_TIMEFRAME=5m
+DONCHIAN_BAR_SECONDS=300
+DONCHIAN_CHANNEL_N=360
+DONCHIAN_EXIT_M=180
+DONCHIAN_ATR_PERIOD=240
+DONCHIAN_ATR_METHOD=sma_tr
+DONCHIAN_ATR_STOP_MULT=1.5
+DONCHIAN_RISK_PCT=1.0
+DONCHIAN_MAX_RISK_USD=625
+DONCHIAN_MAX_RISK_ENABLED=true
+DONCHIAN_FEE_RATE_PER_SIDE=0
+
+DONCHIAN_LIVE_PROFILE=core
+DONCHIAN_MIN_BREAKOUT_ATR=0
+DONCHIAN_MAX_VOL_RANK=0
+DONCHIAN_VOL_RANK_BARS=240
+DONCHIAN_VOL_RANK_LOOKBACK=12000
+
+DONCHIAN_MAX_BARS_IN_TRADE=240
+DONCHIAN_SHADOW_MAX_BARS_IN_TRADE=240
+
+DONCHIAN_LATE_TRAIL_ON_BARS=216
+DONCHIAN_LATE_TRAIL_R=2
+DONCHIAN_LATE_TRAIL_MIN_MFE=6
+```
+
+`.env.b` (1m satellite):
+
+```dotenv
+SHADOW_BASELINE=true
+DONCHIAN_SHADOW_BRK_VOL=true
+
+DONCHIAN_TAG=1m_N1800_M900_ATR1200_R1.0_brk0_voloff_tstop14h_late12h_6R_satellite
+DONCHIAN_TIMEFRAME=1m
+DONCHIAN_BAR_SECONDS=60
+DONCHIAN_CHANNEL_N=1800
+DONCHIAN_EXIT_M=900
+DONCHIAN_ATR_PERIOD=1200
+DONCHIAN_ATR_METHOD=sma_tr
+DONCHIAN_ATR_STOP_MULT=1.5
+DONCHIAN_RISK_PCT=1.0
+DONCHIAN_MAX_RISK_USD=1000
+DONCHIAN_MAX_RISK_ENABLED=true
+DONCHIAN_FEE_RATE_PER_SIDE=0
+
+DONCHIAN_LIVE_PROFILE=core
+DONCHIAN_MIN_BREAKOUT_ATR=0
+DONCHIAN_MAX_VOL_RANK=0
+DONCHIAN_VOL_RANK_BARS=1200
+DONCHIAN_VOL_RANK_LOOKBACK=60000
+
+DONCHIAN_MAX_BARS_IN_TRADE=840
+DONCHIAN_SHADOW_MAX_BARS_IN_TRADE=840
+
+DONCHIAN_LATE_TRAIL_ON_BARS=720
+DONCHIAN_LATE_TRAIL_R=6
+DONCHIAN_LATE_TRAIL_MIN_MFE=15
+```
+
+Проверка, что секреты на месте и knobs правильные:
+
+```bash
+grep -E '^(LIGHTER_API_PRIVATE_KEY|LIGHTER_ACCOUNT_INDEX|DASHBOARD_PASSWORD|TELEGRAM_BOT_TOKEN)=' .env.a .env.b
+# ключи не пустые
+
+grep -E '^(DONCHIAN_TAG|DONCHIAN_LIVE_PROFILE|DONCHIAN_MIN_BREAKOUT_ATR|DONCHIAN_MAX_VOL_RANK|DONCHIAN_MAX_BARS_IN_TRADE|DONCHIAN_LATE_TRAIL_|DONCHIAN_SHADOW_LATE_TRAIL_|KILL_SWITCH)=' .env.a .env.b
+```
+
+Ожидание:
+
+- `.env.a`: `LIVE_PROFILE=core`, brk=0, vol=0, tstop=240, trail **216/2/6**, `KILL_SWITCH=false`
+- `.env.b`: `LIVE_PROFILE=core`, brk=0, vol=0, tstop=840, trail **720/6/15**, tag содержит `satellite`, `KILL_SWITCH=false`
+
+Если `KILL_SWITCH=true` — выключить в **файле** до recreate.
+
+### 0.3 Порядок на бирже, потом git + wipe
+
+1. В Lighter UI оба аккаунта: позиции FLAT, нет reduce-only стопов.  
+2. Потом §1.1 (с бэкапом) или §1.0.  
+3. `bot_b` (1m) греет **долго** (канал N=1800 + запас). `start_period` у `bot_b` = 3600s — контейнер не убивать.
+
+---
+
+
 ## 1.0 Остановка, полный сброс, pull, перезапуск — без бэкапа
 
+Для перехода на BRK0 + late trail сначала §0 (правка `.env.a`/`.env.b`).  
 Журналы и sqlite **пропадут**. Откатить нечем.
 
 ```bash
@@ -89,9 +220,10 @@ docker compose up -d --build --force-recreate bot_a bot_b web
 
 ```bash
 docker compose ps
-docker compose exec bot_a printenv KILL_SWITCH
-docker compose exec bot_b printenv KILL_SWITCH
-# оба: false
+docker compose exec bot_a printenv KILL_SWITCH DONCHIAN_LIVE_PROFILE DONCHIAN_MIN_BREAKOUT_ATR DONCHIAN_MAX_VOL_RANK DONCHIAN_LATE_TRAIL_ON_BARS DONCHIAN_LATE_TRAIL_R DONCHIAN_LATE_TRAIL_MIN_MFE DONCHIAN_TAG
+docker compose exec bot_b printenv KILL_SWITCH DONCHIAN_LIVE_PROFILE DONCHIAN_MIN_BREAKOUT_ATR DONCHIAN_MAX_VOL_RANK DONCHIAN_LATE_TRAIL_ON_BARS DONCHIAN_LATE_TRAIL_R DONCHIAN_LATE_TRAIL_MIN_MFE DONCHIAN_TAG
+# a: KILL_SWITCH=false  PROFILE=core  brk=0  vol=0  trail=216/2/6  tag=..._brk0_voloff_..._late18h_2R
+# b: KILL_SWITCH=false  PROFILE=core  brk=0  vol=0  trail=720/6/15 tag=..._satellite
 
 docker compose exec bot_a wget -qO- http://127.0.0.1:8080/api/health
 
@@ -99,11 +231,15 @@ docker compose logs --tail=80 bot_a
 docker compose logs -f bot_b
 ```
 
-В логах: `bootstrapped` / `boot catchup ok`, `http listen`.  
+В логах старта (`strategy profile`): `live_profile=core`, `min_breakout_atr=0`, `max_vol_rank=0`, `late_trail_on` / `late_trail_r` как выше; `shadow_trail_r` **тот же**, что live.  
+Не должно быть `DONCHIAN_LIVE_PROFILE "core"` как ошибки (старый бинарь). Если есть — образ не пересобрался (`--build`).
+
+`bootstrapped` / `boot catchup ok`, `http listen`.  
 У `bot_b` (1m) прогрев **долгий** — контейнер не убивать.
 
 Дашборд: аварийный стоп выкл, Live/тень ≈ депозит, позиции FLAT, лаг свечей сотни мс (не минуты).  
-Первый бар может не дать сделку — нормально.
+Live без brk/vol будет входить **чаще**, чем старый профиль. Тень должна входить в те же бары, что live (расхождение = skip/slip/лаг, не фильтры).  
+Первый бар может не дать сделку — нормально. Trail на 5m живёт с 18-го часа в сделке (216×5m), на 1m — с 12-го (720×1m); до этого на бирже обычный ATR-стоп.
 
 Если скрипта часов нет: `/usr/local/sbin/sync-clock-http` — на этом хосте NTP (UDP/123) обычно мёртв, сверка по HTTP `Date` биржи раз в 10 минут.
 
@@ -138,8 +274,8 @@ for c in donchian-bot_a-1 donchian-bot_b-1 donchian-web-1; do
     '{{.Name}} image={{.Config.Image}} id={{.Id}} started={{.State.StartedAt}} finished={{.State.FinishedAt}} restarts={{.RestartCount}} oom={{.State.OOMKilled}} exit={{.State.ExitCode}} status={{.State.Status}}' \
     >> "$OUT/inspect.txt" 2>&1
 done
-docker compose exec -T bot_a printenv KILL_SWITCH INSTANCE_ID INSTANCE_NAME DONCHIAN_TIMEFRAME DONCHIAN_TAG 2>/dev/null > "$OUT/env_runtime_a.txt"
-docker compose exec -T bot_b printenv KILL_SWITCH INSTANCE_ID INSTANCE_NAME DONCHIAN_TIMEFRAME DONCHIAN_TAG 2>/dev/null > "$OUT/env_runtime_b.txt"
+docker compose exec -T bot_a printenv KILL_SWITCH INSTANCE_ID INSTANCE_NAME DONCHIAN_TIMEFRAME DONCHIAN_TAG DONCHIAN_LIVE_PROFILE DONCHIAN_MIN_BREAKOUT_ATR DONCHIAN_MAX_VOL_RANK DONCHIAN_MAX_BARS_IN_TRADE DONCHIAN_LATE_TRAIL_ON_BARS DONCHIAN_LATE_TRAIL_R DONCHIAN_LATE_TRAIL_MIN_MFE 2>/dev/null > "$OUT/env_runtime_a.txt"
+docker compose exec -T bot_b printenv KILL_SWITCH INSTANCE_ID INSTANCE_NAME DONCHIAN_TIMEFRAME DONCHIAN_TAG DONCHIAN_LIVE_PROFILE DONCHIAN_MIN_BREAKOUT_ATR DONCHIAN_MAX_VOL_RANK DONCHIAN_MAX_BARS_IN_TRADE DONCHIAN_LATE_TRAIL_ON_BARS DONCHIAN_LATE_TRAIL_R DONCHIAN_LATE_TRAIL_MIN_MFE 2>/dev/null > "$OUT/env_runtime_b.txt"
 
 /usr/local/sbin/sync-clock-http > "$OUT/clock.txt" 2>&1
 date -u >> "$OUT/clock.txt"

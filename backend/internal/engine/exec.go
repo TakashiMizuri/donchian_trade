@@ -260,10 +260,26 @@ func (e *Engine) setOrderIdx(symbol string, entry, sl int64) {
 	}
 }
 
+func (e *Engine) setSLTrigger(symbol string, trigger float64) {
+	e.idxMu.Lock()
+	defer e.idxMu.Unlock()
+	if e.slTrigger == nil {
+		e.slTrigger = map[string]float64{}
+	}
+	e.slTrigger[symbol] = trigger
+}
+
+func (e *Engine) slTriggerPx(symbol string) float64 {
+	e.idxMu.Lock()
+	defer e.idxMu.Unlock()
+	return e.slTrigger[symbol]
+}
+
 func (e *Engine) clearOrderIdx(symbol string) {
 	e.idxMu.Lock()
 	delete(e.entryIdx, symbol)
 	delete(e.slIdx, symbol)
+	delete(e.slTrigger, symbol)
 	delete(e.fundingBasis, symbol)
 	e.idxMu.Unlock()
 }

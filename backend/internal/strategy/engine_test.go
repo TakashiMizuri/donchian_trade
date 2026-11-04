@@ -244,6 +244,119 @@ func TestNoSameBarReentryAfterExit(t *testing.T) {
 	}
 }
 
+func TestLateTrailExitsAtLaggedPeakMinusR(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ChannelN = 3
+	cfg.ExitM = 2
+	cfg.ATRPeriod = 2
+	cfg.MaxBarsInTrade = 20
+	cfg.LateTrailOnBars = 3
+	cfg.LateTrailR = 2
+	cfg.LateTrailMinMFE = 6
+
+	bars := make([]Bar, 12)
+	for i := range bars {
+		bars[i] = Bar{Time: int64(i), Open: 100, High: 101, Low: 99, Close: 100}
+	}
+	bars[3] = Bar{Time: 3, Open: 100, High: 110, Low: 100, Close: 109} // signal
+	bars[4] = Bar{Time: 4, Open: 100, High: 101, Low: 99.5, Close: 100.5} // entry
+
+	atr := ATR(bars, cfg.ATRPeriod)
+	st := NewState(10_000)
+	enter := Decide(bars, atr, 3, bars[4].Open, bars[4].Time, st, cfg)
+	if enter.Kind != ActionEnter {
+		t.Fatalf("enter %+v", enter)
+	}
+	Apply(&st, cfg, bars, enter)
+	risk := st.Position.RiskDistance
+	entry := st.Position.EntryPrice
+	orig := st.Position.Stop
+	peak := entry + 10*risk
+	trail := peak - 2*risk
+	// Quiet climb so orig SL never trades; peak lands on bar 7 (lagged for i=8).
+	for i := 5; i <= 7; i++ {
+		px := entry + float64(i-4)*risk
+		bars[i] = Bar{Time: int64(i), Open: px, High: px + 0.1, Low: px - 0.1, Close: px}
+	}
+	bars[7] = Bar{Time: 7, Open: peak - risk, High: peak, Low: peak - risk, Close: peak - 0.5}
+	if trail <= orig {
+		t.Fatalf("trail %v should be above orig %v", trail, orig)
+	}
+	// Bar 8: a new high is ignored for this bar's stop; wick through lagged trail.
+	bars[8] = Bar{Time: 8, Open: peak, High: peak + 5*risk, Low: trail - 0.01, Close: trail + risk}
+	atr = ATR(bars, cfg.ATRPeriod)
+	got, ok := TrailStopForBar(bars, 8, st.Position, cfg)
+	if !ok {
+		t.Fatal("trail should be armed at i=8")
+	}
+	almostEqual(t, "lagged trail", got, trail, 1e-9)
+	act8 := Decide(bars, atr, 8, bars[9].Open, bars[9].Time, st, cfg)
+	if act8.Kind != ActionExitTrail {
+		t.Fatalf("want trail exit, got %+v (trail=%v orig=%v)", act8, trail, orig)
+	}
+	almostEqual(t, "trail fill", act8.Price, trail, 1e-9)
+	tr := Apply(&st, cfg, bars, act8)
+	if tr == nil || tr.Outcome != OutcomeTime {
+		t.Fatalf("trade %+v", tr)
+	}
+}
+
+func TestOrigSLBeatsTrailSameBar(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ChannelN = 3
+	cfg.ExitM = 2
+	cfg.ATRPeriod = 2
+	cfg.MaxBarsInTrade = 20
+	cfg.LateTrailOnBars = 3
+	cfg.LateTrailR = 2
+	cfg.LateTrailMinMFE = 6
+	bars := make([]Bar, 10)
+	for i := range bars {
+		bars[i] = Bar{Time: int64(i), Open: 100, High: 101, Low: 99, Close: 100}
+	}
+	bars[3] = Bar{Time: 3, Open: 100, High: 110, Low: 100, Close: 109}
+	bars[4] = Bar{Time: 4, Open: 100, High: 101, Low: 99.5, Close: 100.5}
+	atr := ATR(bars, cfg.ATRPeriod)
+	st := NewState(10_000)
+	enter := Decide(bars, atr, 3, bars[4].Open, bars[4].Time, st, cfg)
+	Apply(&st, cfg, bars, enter)
+	risk := st.Position.RiskDistance
+	peak := st.Position.EntryPrice + 10*risk
+	for i := 5; i <= 7; i++ {
+		bars[i] = Bar{Time: int64(i), Open: peak - risk, High: peak, Low: peak - risk, Close: peak - 0.2}
+	}
+	bars[8] = Bar{Time: 8, Open: peak, High: peak, Low: 1, Close: 50} // orig SL + trail
+	atr = ATR(bars, cfg.ATRPeriod)
+	act := Decide(bars, atr, 8, bars[9].Open, bars[9].Time, st, cfg)
+	if act.Kind != ActionExitStop {
+		t.Fatalf("orig SL must win over trail, got %+v", act)
+	}
+}
+
+func TestLateTrailOffWhenOnBarsZero(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ChannelN = 3
+	cfg.ExitM = 2
+	cfg.ATRPeriod = 2
+	cfg.MaxBarsInTrade = 0
+	cfg.LateTrailOnBars = 0
+	cfg.LateTrailR = 2
+	cfg.LateTrailMinMFE = 6
+	bars := make([]Bar, 12)
+	for i := range bars {
+		px := 100.0 + float64(i)*5
+		bars[i] = Bar{Time: int64(i), Open: px, High: px + 2, Low: px - 2, Close: px + 1}
+	}
+	bars[3] = Bar{Time: 3, Open: 100, High: 130, Low: 100, Close: 129}
+	st := NewState(10_000)
+	atr := ATR(bars, cfg.ATRPeriod)
+	enter := Decide(bars, atr, 3, bars[4].Open, bars[4].Time, st, cfg)
+	Apply(&st, cfg, bars, enter)
+	if _, ok := TrailStopForBar(bars, 10, st.Position, cfg); ok {
+		t.Fatal("trail must be off")
+	}
+}
+
 func TestReplayGeneratesLongAndShort(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ChannelN = 5

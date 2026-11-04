@@ -4,8 +4,8 @@
 
 | Инстанс | Роль | Профиль | Контракт |
 |---------|------|---------|----------|
-| `bot_a` | **Primary** | `5m` · N360/M180/ATR240 · risk 1% · cap $625 · brk+vol · **tstop 20h** | [`DONCHIAN_LIVE_STARTPACK_5M_BRK_VOL_TSTOP20.md`](docs/DONCHIAN_LIVE_STARTPACK_5M_BRK_VOL_TSTOP20.md) |
-| `bot_b` | **Satellite** (write-off) | `1m` · N1800/M900/ATR1200 · risk 1% · cap $1000 · brk+vol · **tstop 14h** · BTC only | [`DONCHIAN_LIVE_STARTPACK_1M_BRK_VOL_TSTOP14.md`](docs/DONCHIAN_LIVE_STARTPACK_1M_BRK_VOL_TSTOP14.md) |
+| `bot_a` | **Primary** | `5m` · N360/M180/ATR240 · risk 1% · cap $625 · **brk off · vol off** · tstop 20h · **late trail 18h/2R** | [`DONCHIAN_LIVE_STARTPACK_5M_BRK0_VOLOFF_TSTOP20_LATE_TRAIL2.md`](docs/DONCHIAN_LIVE_STARTPACK_5M_BRK0_VOLOFF_TSTOP20_LATE_TRAIL2.md) |
+| `bot_b` | **Satellite** (write-off) | `1m` · N1800/M900/ATR1200 · risk 1% · cap $1000 · **brk off · vol off** · tstop 14h · **late trail 12h/6R** · BTC only | [`DONCHIAN_LIVE_STARTPACK_1M_BRK0_VOLOFF_TSTOP14_LATE_TRAIL6.md`](docs/DONCHIAN_LIVE_STARTPACK_1M_BRK0_VOLOFF_TSTOP14_LATE_TRAIL6.md) |
 
 Контракт механизма: [`docs/DONCHIAN_LIVE_STARTPACK.md`](docs/DONCHIAN_LIVE_STARTPACK.md). Смена TF/N/M/tstop — новый run (новый `bot.db`), не «докрутка» старого журнала. Live vs shadow (три книги, verdict WAIT/STOP): **§17**. Satellite **не** замена primary.
 
@@ -25,10 +25,10 @@
 
 Простыми словами, с примерами и пайплайном час за часом: [`docs/KAK_RABOTAET_STRATEGIYA.md`](docs/KAK_RABOTAET_STRATEGIYA.md).
 
-- Пробой канала Дончиана на **закрытом баре TF из env** (кандидат 5m, N=360 ≈ 30 часов). Вход при **brk ≥ 0.5×ATR** и **vol_rank < 0.64**. Выход: ATR-стоп `1.5×ATR`, канал M, или **time-stop** (`DONCHIAN_MAX_BARS_IN_TRADE`, на 5m = 240 = 20h).
-- Один слот позиции **на символ**. Twin-тень: те же фильтры, tstop обычно **выкл** (`DONCHIAN_SHADOW_MAX_BARS_IN_TRADE=0`).
+- Пробой канала Дончиана на **закрытом баре TF из env** (кандидат 5m, N=360 ≈ 30 часов). Live-вход **без** brk/vol (`MIN_BREAKOUT_ATR=0`, `MAX_VOL_RANK=0`). Выход: ATR-стоп `1.5×ATR`, канал M, **time-stop** (5m = 240 = 20h), или **late trail** после 18h при MFE ≥ 6R (стоп = lagged peak − 2R).
+- Один слот позиции **на символ**. Twin-тень (`shadow_ls5`) = **та же** стратегия на бумаге (идеальные филлы). Gap = исполнение.
 - Сайзинг: **1% equity** на сделку, cap **$625**.
-- Фильтры входа: **brk0.5+vol_rank**. Книга twin в БД: `shadow_ls5`.
+- Live-профиль: **`core`**. Книга twin в БД: `shadow_ls5`.
 - Ожидаемый профиль: winrate **~25–30%**, max DD часто **−25…−35%**, прибыль от редких runners. Серии мелких −R — норма. Если live показывает WR 55% и крошечный DD — скорее баг порта.
 
 Research считался на Binance. Live идёт на **Lighter**. Свечи и fills не совпадут с backtest — это ожидаемо.
@@ -46,12 +46,12 @@ Lighter REST + WS ←  bot (свечи из DONCHIAN_TIMEFRAME, IOC market, redu
 
 Решения принимаются **только на закрытой свече выбранного TF**. Сразу после close ставится market IOC (это `open` следующего бара), затем reduce-only **STOP_LOSS** на бирже. Channel-exit — тоже market reduce-only на следующем open.
 
-С бара 0 считаются **три книги** на одних и тех же closed futures: **Live**, **Тень (фильтры)** (DB `shadow_ls5`), **Baseline**. Канон сверки: Live ↔ twin того же live-профиля. Не сравнивать месяц live с yearly fee-0 дашбордом.
+С бара 0 считаются **три книги** на одних и тех же closed futures: **Live**, **Тень** (DB `shadow_ls5` = paper-копия live), **Baseline**. Канон сверки: Live ↔ twin. Не сравнивать месяц live с yearly fee-0 дашбордом.
 
 Подробные JSONL-логи: `LOG_DIR` (default `/data/logs`), файлы `bot-YYYYMMDD.jsonl`. Копия с прод: `docker compose exec bot_a ls /data/logs`.  
 Детект закрытия свечи (WS `t`↑ + boundary REST): [`docs/LATENCY_CANDLE_CLOSE.md`](docs/LATENCY_CANDLE_CLOSE.md).  
-5m + tstop20h: [`docs/DONCHIAN_LIVE_STARTPACK_5M_BRK_VOL_TSTOP20.md`](docs/DONCHIAN_LIVE_STARTPACK_5M_BRK_VOL_TSTOP20.md).  
-1m satellite + tstop14h: [`docs/DONCHIAN_LIVE_STARTPACK_1M_BRK_VOL_TSTOP14.md`](docs/DONCHIAN_LIVE_STARTPACK_1M_BRK_VOL_TSTOP14.md).
+5m R-026: [`docs/DONCHIAN_LIVE_STARTPACK_5M_BRK0_VOLOFF_TSTOP20_LATE_TRAIL2.md`](docs/DONCHIAN_LIVE_STARTPACK_5M_BRK0_VOLOFF_TSTOP20_LATE_TRAIL2.md).  
+1m R-025 satellite: [`docs/DONCHIAN_LIVE_STARTPACK_1M_BRK0_VOLOFF_TSTOP14_LATE_TRAIL6.md`](docs/DONCHIAN_LIVE_STARTPACK_1M_BRK0_VOLOFF_TSTOP14_LATE_TRAIL6.md).
 
 **Касса shadow = зеркало счёта.** `START_EQUITY` не задаётся. Первое ненулевое equity на бирже — seed всех трёх книг. Дальше пополнения и выводы детектятся как остаток `Δwallet − PnL − комиссии входа` (у Lighter нет нормальной истории депозитов в trading API) и тем же числом пишутся в shadow. PnL и mark не считаются кэш-флоу.
 
@@ -127,8 +127,8 @@ curl "https://api.telegram.org/bot<TOKEN>/getUpdates"
 Прод = **два бота** (`bot_a`, `bot_b`) + один дашборд с переключателем.
 
 ```bash
-cp .env.example .env.a          # primary 5m tstop20h
-cp .env.b.example .env.b        # satellite 1m tstop14h
+cp .env.example .env.a          # primary 5m brk0 + late 2R
+cp .env.b.example .env.b        # satellite 1m brk0 + late 6R
 # .env.a / .env.b: разные LIGHTER_* (счёт или субаккаунт)
 # одинаковый DASHBOARD_PASSWORD в обоих — один логин на дашборде
 mkdir -p data/a data/b
@@ -153,13 +153,16 @@ mkdir -p data/a data/b
 | `DONCHIAN_ATR_STOP_MULT` | стоп = mult × ATR | `1.5` |
 | `DONCHIAN_RISK_PCT` | риск на стоп | `1.0` |
 | `DONCHIAN_MAX_RISK_USD` | cap риска сделки | `625` |
-| `DONCHIAN_LIVE_PROFILE` | `brk0.5+vol_rank` / `brk0.5` / `vol_rank` / `baseline` | `brk0.5+vol_rank` |
-| `DONCHIAN_MIN_BREAKOUT_ATR` | сила пробоя (0=off) | `0.5` |
-| `DONCHIAN_MAX_VOL_RANK` | squeeze gate (0=off) | `0.64` |
-| `DONCHIAN_VOL_RANK_BARS` / `LOOKBACK` | окна vol_rank | `240` / `12000` на 5m |
+| `DONCHIAN_LIVE_PROFILE` | `core` / `brk0.5+vol_rank` / `brk0.5` / `vol_rank` / `baseline` | `core` |
+| `DONCHIAN_MIN_BREAKOUT_ATR` | сила пробоя (0=off) | `0` |
+| `DONCHIAN_MAX_VOL_RANK` | squeeze gate (0=off) | `0` |
+| `DONCHIAN_VOL_RANK_BARS` / `LOOKBACK` | окна vol_rank (для тени) | `240` / `12000` на 5m |
 | `DONCHIAN_MAX_BARS_IN_TRADE` | live time-stop (бары; 0=off) | `240` (=20h @5m) |
-| `DONCHIAN_SHADOW_MAX_BARS_IN_TRADE` | twin tstop | `0` |
-| `DONCHIAN_SHADOW_BRK_VOL` | twin-тень с фильтрами (книга shadow_ls5) | `true` |
+| `DONCHIAN_SHADOW_MAX_BARS_IN_TRADE` | twin tstop | `240` на live core |
+| `DONCHIAN_LATE_TRAIL_ON_BARS` | включить late trail (0=off) | `216` (5m) / `720` (1m) |
+| `DONCHIAN_LATE_TRAIL_R` | ширина trail в R | `2` (5m) / `6` (1m) |
+| `DONCHIAN_LATE_TRAIL_MIN_MFE` | мин. lagged peak в R | `6` (5m) / `15` (1m) |
+| `DONCHIAN_SHADOW_BRK_VOL` | twin-тень (книга shadow_ls5) | `true` |
 | `SHADOW_BASELINE` | theoretical core без фильтров | `true` |
 | `LOG_DIR` | JSONL analysis logs | `/data/logs` |
 | `CASH_FLOW_MIN_USD` | порог автодетекта пополнения/вывода | `5` |

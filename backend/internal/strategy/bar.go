@@ -63,6 +63,12 @@ type Config struct {
 	// MaxBarsInTrade is the time-stop in bars (0 = off). Exit at next open when
 	// bars_held >= MaxBarsInTrade; outcome "time" (same as channel exit).
 	MaxBarsInTrade int
+
+	// Late trail (0 OnBars = off). Peak is lagged (through previous bar).
+	// Wick through trail_stop exits now at trail_stop; outcome "time".
+	LateTrailOnBars int
+	LateTrailR      float64
+	LateTrailMinMFE float64
 }
 
 // DefaultConfig is the research 1h fixture used by parity tests (baseline, no filters).

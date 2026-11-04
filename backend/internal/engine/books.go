@@ -106,7 +106,7 @@ func (e *Engine) stepBook(ctx context.Context, symbol, book string, bars []strat
 		if st.Position != nil && id > 0 {
 			st.Position.ID = int(id)
 		}
-	case strategy.ActionExitStop, strategy.ActionExitChannel, strategy.ActionExitTimeStop:
+	case strategy.ActionExitStop, strategy.ActionExitChannel, strategy.ActionExitTimeStop, strategy.ActionExitTrail:
 		e.closeBookWithAction(ctx, symbol, book, bars, st, cfg, act)
 	}
 }

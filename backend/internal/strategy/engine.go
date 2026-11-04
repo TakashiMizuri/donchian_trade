@@ -31,6 +31,7 @@ const (
 	ActionExitStop     ActionKind = "exit_stop"
 	ActionExitChannel  ActionKind = "exit_channel"
 	ActionExitTimeStop ActionKind = "exit_time_stop"
+	ActionExitTrail    ActionKind = "exit_trail"
 )
 
 type Action struct {
@@ -109,7 +110,23 @@ func Decide(bars []Bar, atr []float64, i int, nextOpen float64, nextTime int64, 
 				FillTime:   bars[i].Time,
 			}
 		}
-		// Time-stop before channel (research: SL first, then channel OR tstop → next open).
+		if trail, ok := TrailStopForBar(bars, i, pos, cfg); ok {
+			hit := (pos.Direction == DirBuy && lo <= trail) || (pos.Direction == DirSell && hi >= trail)
+			if hit {
+				return Action{
+					Kind:       ActionExitTrail,
+					Direction:  pos.Direction,
+					Price:      trail,
+					Stop:       pos.Stop,
+					Risk:       pos.RiskDistance,
+					SignalTime: pos.SignalTime,
+					SignalIdx:  i,
+					FillIdx:    i,
+					FillTime:   bars[i].Time,
+				}
+			}
+		}
+		// Time-stop before channel (research: SL first, then trail, then channel OR tstop → next open).
 		if cfg.MaxBarsInTrade > 0 {
 			barsHeld := i - pos.EntryIdx
 			if barsHeld >= cfg.MaxBarsInTrade {
@@ -249,6 +266,50 @@ func ProbeEntry(bars []Bar, atr []float64, i int, cfg Config) Action {
 	return out
 }
 
+// TrailStopForBar is the lagged peak±R stop evaluated on closed bar i
+// (peak through i-1). OnBars=0 disables. Used by Decide and live SL replace.
+func TrailStopForBar(bars []Bar, i int, pos *Position, cfg Config) (float64, bool) {
+	if pos == nil || cfg.LateTrailOnBars <= 0 || cfg.LateTrailR <= 0 || pos.RiskDistance <= 0 {
+		return 0, false
+	}
+	if i-pos.EntryIdx < cfg.LateTrailOnBars {
+		return 0, false
+	}
+	peakTo := i
+	if peakTo > len(bars) {
+		peakTo = len(bars)
+	}
+	if peakTo <= pos.EntryIdx {
+		return 0, false
+	}
+	peak := bars[pos.EntryIdx].High
+	if pos.Direction == DirSell {
+		peak = bars[pos.EntryIdx].Low
+	}
+	for j := pos.EntryIdx + 1; j < peakTo; j++ {
+		if pos.Direction == DirBuy {
+			if bars[j].High > peak {
+				peak = bars[j].High
+			}
+		} else if bars[j].Low < peak {
+			peak = bars[j].Low
+		}
+	}
+	var prevPeakR float64
+	if pos.Direction == DirBuy {
+		prevPeakR = (peak - pos.EntryPrice) / pos.RiskDistance
+	} else {
+		prevPeakR = (pos.EntryPrice - peak) / pos.RiskDistance
+	}
+	if prevPeakR < cfg.LateTrailMinMFE {
+		return 0, false
+	}
+	if pos.Direction == DirBuy {
+		return peak - cfg.LateTrailR*pos.RiskDistance, true
+	}
+	return peak + cfg.LateTrailR*pos.RiskDistance, true
+}
+
 func Apply(st *State, cfg Config, bars []Bar, act Action) *Trade {
 	switch act.Kind {
 	case ActionEnter:
@@ -265,13 +326,13 @@ func Apply(st *State, cfg Config, bars []Bar, act Action) *Trade {
 		}
 		st.NextID++
 		return nil
-	case ActionExitStop, ActionExitChannel, ActionExitTimeStop:
+	case ActionExitStop, ActionExitChannel, ActionExitTimeStop, ActionExitTrail:
 		if st.Position == nil {
 			return nil
 		}
 		pos := st.Position
 		outcome := OutcomeSL
-		if act.Kind == ActionExitChannel || act.Kind == ActionExitTimeStop {
+		if act.Kind == ActionExitChannel || act.Kind == ActionExitTimeStop || act.Kind == ActionExitTrail {
 			outcome = OutcomeTime
 		}
 		riskUSD := RiskUSD(st.Equity, cfg.RiskPct, cfg.MaxRiskUSD)
@@ -327,7 +388,7 @@ func Replay(bars []Bar, cfg Config, startEquity float64, evalFrom, evalTo int64)
 		nextTime := bars[i+1].Time
 		if st.Position != nil {
 			act := Decide(bars, atr, i, nextOpen, nextTime, st, cfg)
-			if act.Kind == ActionExitStop || act.Kind == ActionExitChannel || act.Kind == ActionExitTimeStop {
+			if act.Kind == ActionExitStop || act.Kind == ActionExitChannel || act.Kind == ActionExitTimeStop || act.Kind == ActionExitTrail {
 				if t := Apply(&st, cfg, bars, act); t != nil {
 					trades = append(trades, *t)
 				}

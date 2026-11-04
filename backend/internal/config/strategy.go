@@ -87,6 +87,14 @@ func applyStrategyEnv(cfg *Config) error {
 		if maxVR < 0 {
 			maxVR = 0
 		}
+	case "core", "brk0", "brk0_voloff":
+		profile = "core"
+		if minBrk < 0 {
+			minBrk = 0
+		}
+		if maxVR < 0 {
+			maxVR = 0
+		}
 	case "brk0.5":
 		if minBrk < 0 {
 			minBrk = 0.5
@@ -111,7 +119,7 @@ func applyStrategyEnv(cfg *Config) error {
 			maxVR = 0.64
 		}
 	default:
-		return fmt.Errorf("DONCHIAN_LIVE_PROFILE %q (use brk0.5+vol_rank, brk0.5, vol_rank, baseline)", profile)
+		return fmt.Errorf("DONCHIAN_LIVE_PROFILE %q (use core, brk0.5+vol_rank, brk0.5, vol_rank, baseline)", profile)
 	}
 	if minBrk < 0 {
 		minBrk = 0
@@ -157,18 +165,103 @@ func applyStrategyEnv(cfg *Config) error {
 	}
 	cfg.MaxBarsInTrade = maxBars
 	cfg.ShadowMaxBarsInTrade = shadowMaxBars
+	if profile == "core" && !envSet("DONCHIAN_SHADOW_MAX_BARS_IN_TRADE") {
+		cfg.ShadowMaxBarsInTrade = maxBars
+	}
 
 	if raw := strings.TrimSpace(os.Getenv("DONCHIAN_SHADOW_BRK_VOL")); raw != "" {
 		cfg.ShadowBrkVol = getenvBool("DONCHIAN_SHADOW_BRK_VOL", false)
 	} else {
-		cfg.ShadowBrkVol = profile == "brk0.5+vol_rank" || profile == "brk0.5" || profile == "vol_rank"
+		cfg.ShadowBrkVol = profile == "core" || profile == "brk0.5+vol_rank" || profile == "brk0.5" || profile == "vol_rank"
 	}
+
+	onBars := getenvInt("DONCHIAN_LATE_TRAIL_ON_BARS", 0)
+	trailR := getenvFloat("DONCHIAN_LATE_TRAIL_R", 0)
+	trailMFE := getenvFloat("DONCHIAN_LATE_TRAIL_MIN_MFE", 0)
+	if onBars < 0 || trailR < 0 || trailMFE < 0 {
+		return fmt.Errorf("DONCHIAN_LATE_TRAIL_* must be ≥ 0")
+	}
+	if onBars > 0 {
+		if trailR <= 0 || trailMFE <= 0 {
+			return fmt.Errorf("DONCHIAN_LATE_TRAIL_R and MIN_MFE must be > 0 when ON_BARS > 0")
+		}
+		if maxBars > 0 && onBars >= maxBars {
+			return fmt.Errorf("DONCHIAN_LATE_TRAIL_ON_BARS (%d) must be < MAX_BARS_IN_TRADE (%d)", onBars, maxBars)
+		}
+	}
+	cfg.LateTrailOnBars = onBars
+	cfg.LateTrailR = trailR
+	cfg.LateTrailMinMFE = trailMFE
+
+	// Twin defaults to the live book (ideal paper fills). SHADOW_* overrides only.
+	cfg.ShadowMinBreakoutATR = cfg.MinBreakoutATR
+	cfg.ShadowMaxVolRank = cfg.MaxVolRank
+	cfg.ShadowLateTrailOnBars = onBars
+	cfg.ShadowLateTrailR = trailR
+	cfg.ShadowLateTrailMinMFE = trailMFE
+	if envSet("DONCHIAN_SHADOW_MIN_BREAKOUT_ATR") {
+		cfg.ShadowMinBreakoutATR = getenvFloat("DONCHIAN_SHADOW_MIN_BREAKOUT_ATR", cfg.ShadowMinBreakoutATR)
+	}
+	if envSet("DONCHIAN_SHADOW_MAX_VOL_RANK") {
+		cfg.ShadowMaxVolRank = getenvFloat("DONCHIAN_SHADOW_MAX_VOL_RANK", cfg.ShadowMaxVolRank)
+	}
+	if envSet("DONCHIAN_SHADOW_LATE_TRAIL_ON_BARS") {
+		cfg.ShadowLateTrailOnBars = getenvInt("DONCHIAN_SHADOW_LATE_TRAIL_ON_BARS", cfg.ShadowLateTrailOnBars)
+	}
+	if envSet("DONCHIAN_SHADOW_LATE_TRAIL_R") {
+		cfg.ShadowLateTrailR = getenvFloat("DONCHIAN_SHADOW_LATE_TRAIL_R", cfg.ShadowLateTrailR)
+	}
+	if envSet("DONCHIAN_SHADOW_LATE_TRAIL_MIN_MFE") {
+		cfg.ShadowLateTrailMinMFE = getenvFloat("DONCHIAN_SHADOW_LATE_TRAIL_MIN_MFE", cfg.ShadowLateTrailMinMFE)
+	}
+	if cfg.ShadowMaxVolRank < 0 || cfg.ShadowMaxVolRank > 1 {
+		return fmt.Errorf("DONCHIAN_SHADOW_MAX_VOL_RANK must be in [0,1], got %g", cfg.ShadowMaxVolRank)
+	}
+	if cfg.ShadowLateTrailOnBars < 0 || cfg.ShadowLateTrailR < 0 || cfg.ShadowLateTrailMinMFE < 0 {
+		return fmt.Errorf("DONCHIAN_SHADOW_LATE_TRAIL_* must be ≥ 0")
+	}
+
+	warnCoreProfile(cfg)
 
 	cfg.Tag = strings.TrimSpace(getenv("DONCHIAN_TAG", autoTag(cfg)))
 	if cfg.Tag == "" {
 		cfg.Tag = autoTag(cfg)
 	}
+	if cfg.Resolution == "1m" && cfg.LiveProfile == "core" && !strings.Contains(strings.ToLower(cfg.Tag), "satellite") {
+		cfg.StrategyWarnings = append(cfg.StrategyWarnings, "1m core tag should contain satellite")
+	}
 	return nil
+}
+
+func warnCoreProfile(cfg *Config) {
+	if cfg.LiveProfile != "core" {
+		return
+	}
+	if cfg.MinBreakoutATR != 0 || cfg.MaxVolRank != 0 {
+		cfg.StrategyWarnings = append(cfg.StrategyWarnings,
+			fmt.Sprintf("core profile expects MIN_BREAKOUT_ATR=0 and MAX_VOL_RANK=0, got %g / %g", cfg.MinBreakoutATR, cfg.MaxVolRank))
+	}
+	switch cfg.Resolution {
+	case "5m":
+		if cfg.LateTrailOnBars != 216 || cfg.LateTrailR != 2 || cfg.LateTrailMinMFE != 6 {
+			cfg.StrategyWarnings = append(cfg.StrategyWarnings,
+				fmt.Sprintf("5m R-026 expects late trail 216/2/6, got %d/%g/%g", cfg.LateTrailOnBars, cfg.LateTrailR, cfg.LateTrailMinMFE))
+		}
+		if cfg.LateTrailR == 3 {
+			cfg.StrategyWarnings = append(cfg.StrategyWarnings, "LATE_TRAIL_R=3 is R-024, not R-026 live")
+		}
+		if cfg.LateTrailOnBars == 720 {
+			cfg.StrategyWarnings = append(cfg.StrategyWarnings, "LATE_TRAIL_ON_BARS=720 is the 1m clock, not 5m")
+		}
+	case "1m":
+		if cfg.LateTrailOnBars != 720 || cfg.LateTrailR != 6 || cfg.LateTrailMinMFE != 15 {
+			cfg.StrategyWarnings = append(cfg.StrategyWarnings,
+				fmt.Sprintf("1m R-025 expects late trail 720/6/15, got %d/%g/%g", cfg.LateTrailOnBars, cfg.LateTrailR, cfg.LateTrailMinMFE))
+		}
+		if cfg.LateTrailR == 8 {
+			cfg.StrategyWarnings = append(cfg.StrategyWarnings, "LATE_TRAIL_R=8 is R-023, not R-025 live")
+		}
+	}
 }
 
 func autoTag(cfg *Config) string {
@@ -181,7 +274,11 @@ func autoTag(cfg *Config) string {
 	case cfg.MaxVolRank > 0:
 		tag += "_vol0.64"
 	default:
-		tag += "+baseline"
+		if cfg.LateTrailOnBars > 0 {
+			tag += "_brk0_voloff"
+		} else {
+			tag += "+baseline"
+		}
 	}
 	if cfg.MaxBarsInTrade > 0 {
 		hours := float64(cfg.MaxBarsInTrade) * float64(cfg.BarSeconds) / 3600
@@ -189,6 +286,14 @@ func autoTag(cfg *Config) string {
 			tag += fmt.Sprintf("_tstop%dh", int(hours))
 		} else {
 			tag += fmt.Sprintf("_tstop%db", cfg.MaxBarsInTrade)
+		}
+	}
+	if cfg.LateTrailOnBars > 0 {
+		hours := float64(cfg.LateTrailOnBars) * float64(cfg.BarSeconds) / 3600
+		if hours == float64(int(hours)) {
+			tag += fmt.Sprintf("_late%dh_%gR", int(hours), cfg.LateTrailR)
+		} else {
+			tag += fmt.Sprintf("_late%db_%gR", cfg.LateTrailOnBars, cfg.LateTrailR)
 		}
 	}
 	return tag
@@ -207,6 +312,9 @@ func (c *Config) coreStrategy() strategy.Config {
 		MaxVolRank:      c.MaxVolRank,
 		VolRankBars:     c.VolRankBars,
 		VolRankLookback: c.VolRankLookback,
+		LateTrailOnBars: c.LateTrailOnBars,
+		LateTrailR:      c.LateTrailR,
+		LateTrailMinMFE: c.LateTrailMinMFE,
 	}
 }
 
@@ -216,11 +324,16 @@ func (c *Config) LiveConfig() strategy.Config {
 	return cfg
 }
 
-// ShadowTwinConfig matches live entry filters (stored under profile shadow_ls5).
-// Time-stop is independent (usually 0 so twin matches research fills without tstop).
+// ShadowTwinConfig is the paper twin of live (DB shadow_ls5): same knobs,
+// research fills. Gap vs live is execution, not a second strategy.
 func (c *Config) ShadowTwinConfig() strategy.Config {
 	cfg := c.coreStrategy()
+	cfg.MinBreakoutATR = c.ShadowMinBreakoutATR
+	cfg.MaxVolRank = c.ShadowMaxVolRank
 	cfg.MaxBarsInTrade = c.ShadowMaxBarsInTrade
+	cfg.LateTrailOnBars = c.ShadowLateTrailOnBars
+	cfg.LateTrailR = c.ShadowLateTrailR
+	cfg.LateTrailMinMFE = c.ShadowLateTrailMinMFE
 	return cfg
 }
 
@@ -229,13 +342,19 @@ func (c *Config) BaselineConfig() strategy.Config {
 	cfg.MinBreakoutATR = 0
 	cfg.MaxVolRank = 0
 	cfg.MaxBarsInTrade = 0
+	cfg.LateTrailOnBars = 0
+	cfg.LateTrailR = 0
+	cfg.LateTrailMinMFE = 0
 	return cfg
 }
 
 func (c *Config) Fingerprint() string {
-	return fmt.Sprintf("tf=%s n=%d m=%d atr=%d x%.4g risk=%.4g cap=%.4g fee=%.6g brk=%.4g vol=%.4g vb=%d vl=%d tstop=%d ststop=%d",
+	return fmt.Sprintf("tf=%s n=%d m=%d atr=%d x%.4g risk=%.4g cap=%.4g fee=%.6g brk=%.4g vol=%.4g vb=%d vl=%d tstop=%d ststop=%d trail=%d/%.4g/%.4g strail=%d/%.4g/%.4g sbrk=%.4g svol=%.4g",
 		c.Resolution, c.ChannelN, c.ExitM, c.ATRPeriod, c.ATRStopMult, c.RiskPct, c.MaxRiskUSD, c.FeeRate,
-		c.MinBreakoutATR, c.MaxVolRank, c.VolRankBars, c.VolRankLookback, c.MaxBarsInTrade, c.ShadowMaxBarsInTrade)
+		c.MinBreakoutATR, c.MaxVolRank, c.VolRankBars, c.VolRankLookback, c.MaxBarsInTrade, c.ShadowMaxBarsInTrade,
+		c.LateTrailOnBars, c.LateTrailR, c.LateTrailMinMFE,
+		c.ShadowLateTrailOnBars, c.ShadowLateTrailR, c.ShadowLateTrailMinMFE,
+		c.ShadowMinBreakoutATR, c.ShadowMaxVolRank)
 }
 
 func (c *Config) ProfileLog() []any {
@@ -258,6 +377,13 @@ func (c *Config) ProfileLog() []any {
 		"vol_rank_lookback", c.VolRankLookback,
 		"tstop_bars", c.MaxBarsInTrade,
 		"shadow_tstop_bars", c.ShadowMaxBarsInTrade,
+		"late_trail_on", c.LateTrailOnBars,
+		"late_trail_r", c.LateTrailR,
+		"late_trail_min_mfe", c.LateTrailMinMFE,
+		"shadow_brk", c.ShadowMinBreakoutATR,
+		"shadow_vol", c.ShadowMaxVolRank,
+		"shadow_trail_on", c.ShadowLateTrailOnBars,
+		"shadow_trail_r", c.ShadowLateTrailR,
 		"shadow_twin", c.ShadowBrkVol,
 		"shadow_baseline", c.ShadowBaseline,
 		"log_dir", c.LogDir,
