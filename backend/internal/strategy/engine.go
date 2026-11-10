@@ -267,7 +267,8 @@ func ProbeEntry(bars []Bar, atr []float64, i int, cfg Config) Action {
 }
 
 // TrailStopForBar is the lagged peak±R stop evaluated on closed bar i
-// (peak through i-1). OnBars=0 disables. Used by Decide and live SL replace.
+// (peak through i-1). OnBars=0 disables. Live rests this on the exchange only
+// when it is still a valid stop versus mark; otherwise paper/live exit on close.
 func TrailStopForBar(bars []Bar, i int, pos *Position, cfg Config) (float64, bool) {
 	if pos == nil || cfg.LateTrailOnBars <= 0 || cfg.LateTrailR <= 0 || pos.RiskDistance <= 0 {
 		return 0, false

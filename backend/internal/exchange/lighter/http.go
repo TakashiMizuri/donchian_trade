@@ -635,10 +635,10 @@ func (c *HTTPClient) ActiveOrders(ctx context.Context, accountIndex int64, marke
 			MarketID:         parsed,
 			Remaining:        floatField(m, "remaining_base_amount", "remaining_base_size"),
 			Price:            floatField(m, "price"),
-			Trigger:          floatField(m, "trigger_price"),
+			Trigger:          floatField(m, "trigger_price", "trigger_px", "triggerPrice", "stop_price"),
 			IsAsk:            boolField(m, "is_ask") || strings.EqualFold(strField(m, "side"), "sell"),
 			ReduceOnly:       boolField(m, "reduce_only"),
-			Type:             strField(m, "type"),
+			Type:             strField(m, "type", "order_type"),
 			Status:           strField(m, "status"),
 		})
 	}
@@ -803,4 +803,25 @@ func ScaleAmount(qty float64, decimals int) int64 {
 
 func Unscale(v float64, decimals int) float64 {
 	return v / math.Pow10(decimals)
+}
+
+// NormalizeTrigger maps an exchange trigger to price units. Lighter may return
+// either a float price or an integer tick (ScalePrice).
+func NormalizeTrigger(raw, ref float64, decimals int) float64 {
+	if raw <= 0 {
+		return 0
+	}
+	if decimals <= 0 || ref <= 0 {
+		return raw
+	}
+	u := Unscale(raw, decimals)
+	if u <= 0 {
+		return raw
+	}
+	relRaw := math.Abs(raw-ref) / ref
+	relU := math.Abs(u-ref) / ref
+	if relU < relRaw && relRaw > 0.5 {
+		return u
+	}
+	return raw
 }

@@ -142,14 +142,27 @@ func (e *Engine) recordEntryFill(ctx context.Context, symbol string, tradeID, cl
 // position's avg entry as the exit — that recorded ~0 PnL on 1m while the
 // exchange was still in the trade, then reconcile flattened without booking it.
 // Last/shadow fallbacks are allowed only after the exchange position is flat.
-func (e *Engine) resolveLiveExitFill(ctx context.Context, symbol string, clientIdx int64, txHash string, shadowExit float64) (px, fee float64) {
+func (e *Engine) resolveLiveExitFill(ctx context.Context, symbol string, clientIdx int64, txHash string, shadowExit float64, flattenIfOpen bool) (px, fee float64) {
 	px, fee = e.waitFillFor(ctx, symbol, clientIdx, txHash, 0, 12*time.Second)
 	if px > 0 {
 		return px, fee
 	}
 	if ex := e.exchangePos(ctx, symbol); ex != nil && ex.Size > 0 {
+		if !flattenIfOpen {
+			e.Log.Warn("exit fill missing while exchange still open — not flattening (wait for SL or explicit exit)",
+				"symbol", symbol, "client", clientIdx, "size", ex.Size)
+			e.flog("exit_unresolved", map[string]any{
+				"symbol": symbol, "client_idx": clientIdx, "size": ex.Size,
+				"shadow_exit": shadowExit, "flatten": false,
+			})
+			return 0, 0
+		}
 		e.Log.Warn("exit fill missing while exchange still open — forcing flatten",
 			"symbol", symbol, "client", clientIdx, "size", ex.Size)
+		e.flog("exit_unresolved", map[string]any{
+			"symbol": symbol, "client_idx": clientIdx, "size": ex.Size,
+			"shadow_exit": shadowExit, "flatten": true,
+		})
 		flatIdx, flatTx := e.flatten(ctx, symbol, *ex)
 		if flatIdx != 0 {
 			if p, f := e.waitFillFor(ctx, symbol, flatIdx, flatTx, 0, 12*time.Second); p > 0 {
@@ -183,7 +196,7 @@ func (e *Engine) resolveLiveExitFill(ctx context.Context, symbol string, clientI
 	return 0, 0
 }
 
-func (e *Engine) finishCloseLive(ctx context.Context, symbol string, tradeID int64, st *strategy.State, t *strategy.Trade, clientIdx int64, txHash string) {
+func (e *Engine) finishCloseLive(ctx context.Context, symbol string, tradeID int64, st *strategy.State, t *strategy.Trade, clientIdx int64, txHash string, flattenIfOpen bool) {
 	if t == nil {
 		return
 	}
@@ -196,7 +209,7 @@ func (e *Engine) finishCloseLive(ctx context.Context, symbol string, tradeID int
 		}
 	}
 	shadowExit := t.ExitPrice
-	liveExit, exitFee := e.resolveLiveExitFill(ctx, symbol, clientIdx, txHash, shadowExit)
+	liveExit, exitFee := e.resolveLiveExitFill(ctx, symbol, clientIdx, txHash, shadowExit, flattenIfOpen)
 	if liveExit <= 0 {
 		e.Log.Error("exit fill unresolved — leaving trade open", "symbol", symbol, "client", clientIdx, "signal", t.SignalTime)
 		return

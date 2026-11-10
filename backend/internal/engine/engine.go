@@ -483,13 +483,15 @@ func (e *Engine) processClosed(ctx context.Context, symbol string, bar strategy.
 
 	act := strategy.Decide(bars, atr, i, nextOpen, nextTime, st, e.liveCfg)
 	switch act.Kind {
-	case strategy.ActionExitStop:
-		e.noteStopHit(ctx, symbol, &st, bars, act)
-	case strategy.ActionExitTrail:
+	case strategy.ActionExitStop, strategy.ActionExitTrail:
 		e.noteStopHit(ctx, symbol, &st, bars, act)
 		if st.Position != nil {
+			label := "stop"
+			if act.Kind == strategy.ActionExitTrail {
+				label = "trail"
+			}
 			if err := e.executeExit(ctx, symbol, &st, bars, act, true); err != nil {
-				e.alert(ctx, "error", "exit", symbol+" trail exit failed: "+err.Error())
+				e.alert(ctx, "error", "exit", symbol+" "+label+" exit failed: "+err.Error())
 			}
 		}
 	case strategy.ActionExitChannel, strategy.ActionExitTimeStop:
@@ -512,7 +514,7 @@ func (e *Engine) processClosed(ctx context.Context, symbol string, bar strategy.
 		e.alert(ctx, "error", "db", "candle persist: "+err.Error())
 	}
 	if st.Position != nil {
-		e.maybeArmTrailStop(ctx, symbol, bars, i, st)
+		e.maybeArmTrailStop(ctx, symbol, bars, st)
 	}
 
 	if e.Cfg.ShadowBrkVol {
@@ -704,9 +706,11 @@ func (e *Engine) executeEntry(ctx context.Context, symbol string, st *strategy.S
 	_, slErr := e.Signer.StopLoss(symbol, buy, qty, act.Stop, e.Cfg.MarketSlippage, slIdx)
 	e.txMu.Unlock()
 	if slErr != nil {
-		if e.Flog != nil {
-			e.Flog.Event("sl_failed", map[string]any{"symbol": symbol, "stop": act.Stop, "err": slErr.Error()})
-		}
+		e.flog("sl_place_failed", map[string]any{
+			"symbol": symbol, "reason": "entry", "stop": act.Stop, "client_idx": slIdx,
+			"qty": qty, "side": act.Direction, "err": slErr.Error(),
+			"mark": e.LastPrice(symbol),
+		})
 		e.alert(ctx, "error", "stop", symbol+" failed to place SL after entry: "+slErr.Error()+" — flattening")
 		e.txMu.Lock()
 		_, err2 := e.Signer.MarketIOC(symbol, !buy, qty, act.Price, e.Cfg.MarketSlippage, slIdx+1, true)
@@ -718,9 +722,12 @@ func (e *Engine) executeEntry(ctx context.Context, symbol string, st *strategy.S
 		e.clearOrderIdx(symbol)
 		return slErr
 	}
-	if e.Flog != nil {
-		e.Flog.Event("sl_placed", map[string]any{"symbol": symbol, "stop": act.Stop, "client_idx": slIdx})
-	}
+	e.flog("sl_placed", map[string]any{
+		"symbol": symbol, "reason": "entry", "stop": act.Stop, "client_idx": slIdx,
+		"qty": qty, "side": act.Direction, "mark": e.LastPrice(symbol),
+		"price_decimals": e.priceDecimals(symbol),
+		"scaled_trigger": lighter.ScalePrice(act.Stop, e.priceDecimals(symbol)),
+	})
 	_ = e.Store.InsertOrder(ctx, symbol, slIdx, "stop", "open", true, 0, act.Stop, qty, "")
 	e.setOrderIdx(symbol, clientIdx, slIdx)
 	e.setSLTrigger(symbol, act.Stop)
@@ -770,12 +777,11 @@ func (e *Engine) executeExit(ctx context.Context, symbol string, st *strategy.St
 	if e.Signer == nil {
 		return fmt.Errorf("signer is not configured")
 	}
-	if e.Flog != nil {
-		e.Flog.Event("exit_intent", map[string]any{
-			"symbol": symbol, "kind": act.Kind, "direction": pos.Direction,
-			"qty": qty, "ref_px": act.Price,
-		})
-	}
+	e.flog("exit_intent", map[string]any{
+		"symbol": symbol, "kind": act.Kind, "direction": pos.Direction,
+		"qty": qty, "ref_px": act.Price, "orig_stop": pos.Stop,
+		"mark": e.LastPrice(symbol), "local_sl": e.slTriggerPx(symbol),
+	})
 	clientIdx, err := e.Store.NextClientOrderIndex(ctx)
 	if err != nil {
 		return err
@@ -792,7 +798,7 @@ func (e *Engine) executeExit(ctx context.Context, symbol string, st *strategy.St
 	}
 	e.cancelStops(ctx, symbol)
 	t := strategy.Apply(st, e.liveCfg, bars, act)
-	e.finishCloseLive(ctx, symbol, int64(pos.ID), st, t, clientIdx, tx)
+	e.finishCloseLive(ctx, symbol, int64(pos.ID), st, t, clientIdx, tx, true)
 	if row, _ := e.Store.TradeBySignal(ctx, symbol, telemetry.BookLive, pos.SignalTime); row != nil {
 		if !row.Outcome.Valid || row.Outcome.String == "" || row.Outcome.String == "open" {
 			st.Position = &pos
@@ -820,7 +826,7 @@ func (e *Engine) noteStopHit(ctx context.Context, symbol string, st *strategy.St
 		return
 	}
 	slIdx := e.slClientIdx(symbol)
-	e.finishCloseLive(ctx, symbol, int64(pos.ID), st, t, slIdx, "")
+	e.finishCloseLive(ctx, symbol, int64(pos.ID), st, t, slIdx, "", false)
 	// Candle OHLC can cross the stop before the exchange fill is visible. If we
 	// could not book a real exit, restore local state and keep the protective SL.
 	if row, _ := e.Store.TradeBySignal(ctx, symbol, telemetry.BookLive, pos.SignalTime); row != nil {
@@ -855,25 +861,7 @@ func (e *Engine) finishClose(ctx context.Context, symbol string, id int64, st *s
 }
 
 func (e *Engine) cancelStops(ctx context.Context, symbol string) {
-	if e.Cfg.DryRun {
-		return
-	}
-	meta := e.Markets[symbol]
-	orders, err := e.HTTP.ActiveOrders(ctx, e.Cfg.AccountIndex, meta.MarketID)
-	if err != nil {
-		e.Log.Warn("list orders", "err", err)
-		return
-	}
-	for _, o := range orders {
-		if o.ReduceOnly || o.Trigger > 0 {
-			e.txMu.Lock()
-			_, err := e.Signer.Cancel(symbol, o.OrderIndex)
-			if err != nil && o.ClientOrderIndex > 0 {
-				_, _ = e.Signer.Cancel(symbol, o.ClientOrderIndex)
-			}
-			e.txMu.Unlock()
-		}
-	}
+	e.cancelProtectiveStops(ctx, symbol, 0, 0)
 }
 
 func (e *Engine) Reconcile(ctx context.Context) {
@@ -983,7 +971,7 @@ func (e *Engine) Reconcile(ctx context.Context) {
 		if e.Cfg.DryRun {
 			e.finishClose(ctx, p.sym, p.id, &p.st, t, act)
 		} else {
-			e.finishCloseLive(ctx, p.sym, p.id, &p.st, t, e.slClientIdx(p.sym), "")
+			e.finishCloseLive(ctx, p.sym, p.id, &p.st, t, e.slClientIdx(p.sym), "", false)
 			if row, _ := e.Store.TradeBySignal(ctx, p.sym, telemetry.BookLive, p.signalTime); row != nil {
 				if !row.Outcome.Valid || row.Outcome.String == "" || row.Outcome.String == "open" {
 					// Exchange looks flat but we could not book an exit — restore local
@@ -1033,41 +1021,80 @@ func (e *Engine) ensureStop(ctx context.Context, symbol string, st strategy.Stat
 		return
 	}
 	meta := e.Markets[symbol]
+	mark := e.lastPrice[symbol]
+	want, wantKind, trail, trailOK := intendedProtectiveStop(st.Position, e.bars[symbol], e.liveCfg, mark)
 	orders, err := e.HTTP.ActiveOrders(ctx, e.Cfg.AccountIndex, meta.MarketID)
 	if err != nil {
 		e.alert(ctx, "warn", "watchdog", symbol+" cannot list orders: "+err.Error())
+		e.flog("sl_watch", map[string]any{
+			"symbol": symbol, "action": "list_failed", "err": err.Error(),
+			"want": want, "want_kind": wantKind, "mark": mark,
+		})
 		return
 	}
-	want := st.Position.Stop
-	if trail, ok := strategy.TrailStopForBar(e.bars[symbol], len(e.bars[symbol]), st.Position, e.liveCfg); ok {
-		want = trail
+	ref := mark
+	if ref <= 0 {
+		ref = want
 	}
-	hasSL := false
-	trigger := 0.0
+	dec := meta.PriceDecimals
+	var protective []lighter.OpenOrder
+	snaps := make([]map[string]any, 0, len(orders))
 	for _, o := range orders {
-		if o.ReduceOnly && o.Trigger > 0 {
-			hasSL = true
-			trigger = o.Trigger
-			break
+		norm, raw := e.normalizeOrderTrigger(o, ref, dec)
+		o.Trigger = norm
+		snaps = append(snaps, slOrderFields(o, raw))
+		if isProtectiveStop(o) {
+			protective = append(protective, o)
 		}
 	}
-	if hasSL && stopClose(trigger, want) {
-		e.setSLTrigger(symbol, trigger)
-		return
+	fields := map[string]any{
+		"symbol": symbol, "want": want, "want_kind": wantKind, "mark": mark,
+		"orig": st.Position.Stop, "trail": trail, "trail_ok": trailOK,
+		"n_orders": len(orders), "n_protect": len(protective),
+		"side": st.Position.Direction, "orders": snaps,
+		"local_sl": e.slTriggerPx(symbol), "local_sl_idx": e.slClientIdx(symbol),
 	}
-	if hasSL {
+	if len(protective) > 1 {
+		keep := pickKeepStop(protective, want)
+		fields["action"] = "keep_one"
+		fields["keep_client_idx"] = keep.ClientOrderIndex
+		fields["keep_order_idx"] = keep.OrderIndex
+		e.flog("sl_watch", fields)
 		e.mu.Unlock()
-		e.replaceProtectiveStop(ctx, symbol, st, want)
+		e.cancelProtectiveStops(ctx, symbol, keep.ClientOrderIndex, keep.OrderIndex)
 		e.mu.Lock()
+		e.setSLTrigger(symbol, keep.Trigger)
 		return
 	}
-	e.alert(ctx, "error", "watchdog", symbol+" protective stop missing — flattening")
-	pos := lighter.Position{Size: st.Position.Quantity, Sign: 1, AvgEntry: st.Position.EntryPrice}
-	if st.Position.Direction == strategy.DirSell {
-		pos.Sign = -1
+	if len(protective) == 1 {
+		trig := protective[0].Trigger
+		match := stopClose(trig, want)
+		fields["exchange_trigger"] = trig
+		fields["match_want"] = match
+		if match {
+			fields["action"] = "keep"
+		} else {
+			fields["action"] = "keep_mismatch"
+		}
+		e.flog("sl_watch", fields)
+		if !match {
+			e.flog("sl_trigger_mismatch", map[string]any{
+				"symbol": symbol, "exchange_trigger": trig,
+				"want": want, "want_kind": wantKind, "mark": mark,
+				"orig": st.Position.Stop, "client_idx": protective[0].ClientOrderIndex,
+				"order_idx": protective[0].OrderIndex, "type": protective[0].Type,
+			})
+		}
+		e.setSLTrigger(symbol, trig)
+		return
 	}
+	fields["action"] = "rearm"
+	e.flog("sl_watch", fields)
+	e.alert(ctx, "error", "watchdog", symbol+" protective stop missing — replacing (not flattening)")
 	e.mu.Unlock()
-	e.flatten(ctx, symbol, pos)
+	if _, err := e.placeProtectiveStop(ctx, symbol, st, want, "watchdog_rearm"); err != nil {
+		e.alert(ctx, "error", "watchdog", symbol+" failed to re-place SL: "+err.Error())
+	}
 	e.mu.Lock()
 }
 
